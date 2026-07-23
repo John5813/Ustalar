@@ -1,144 +1,89 @@
 import re
-from typing import List, Optional, Literal, Dict, Any
-from pydantic import BaseModel, Field, field_validator
+from typing import List, Optional, Literal
+from pydantic import BaseModel, field_validator
 
 Role = Literal["hook", "context", "breakdown", "detail", "comparison", "application", "synthesis"]
-
-# Har role uchun ruxsat etilgan layout_type'lar (mantiqiy shablon tanlash qoidasi)
-ALLOWED_LAYOUTS_BY_ROLE = {
-    "hook": {"title_dark"},
-    "context": {"icon_row_list", "stat_callout", "image_half_bleed", "definition_spotlight"},
-    "breakdown": {
-        "three_card_grid", "four_card_grid", "agenda_numbered", "timeline_process",
-        "bar_chart", "xy_chart",
-    },
-    "detail": {
-        "two_card_compare", "image_half_bleed", "icon_row_list", "stat_callout",
-        "quote_callout", "math_formula", "bar_chart", "xy_chart",
-    },
-    "comparison": {
-        "comparison_table", "two_card_compare", "stat_row_triple",
-        "bar_chart", "xy_chart",
-    },
-    "application": {
-        "image_half_bleed", "stat_callout", "timeline_process", "mini_case_study",
-        "bar_chart", "math_formula",
-    },
-    "synthesis": {"conclusion_dark"},
-}
-
 ROLE_ORDER = ["hook", "context", "breakdown", "detail", "comparison", "application", "synthesis"]
 
 
-class Palette(BaseModel):
-    primary: str
-    secondary: str
-    accent: str
+class VisualElement(BaseModel):
+    """Slayddagi bitta vizual element — AI koordinat va ranglarni o'zi belgilaydi."""
+    type: Literal["rect", "text", "circle", "image"]
+    x: float                                    # chap chegara (dyuym, 0–13.333)
+    y: float                                    # yuqori chegara (dyuym, 0–7.5)
+    # rect / text / image
+    w: Optional[float] = None                  # kenglik
+    h: Optional[float] = None                  # balandlik
+    # shakl rangi (rect, circle)
+    fill: Optional[str] = None                 # hex, # belgisisiz, masalan "1A1A2E"
+    radius: bool = False                       # yumaloq burchak (faqat rect)
+    # matn maydonlari
+    text: Optional[str] = None
+    size: float = 14                           # punkt
+    bold: bool = False
+    italic: bool = False
+    color: Optional[str] = None               # matn rangi hex
+    align: Literal["left", "center", "right"] = "left"
+    font: str = "Calibri"
+    # aylana
+    d: Optional[float] = None                 # diametr (faqat circle)
+    # rasm generatsiyasi
+    prompt: Optional[str] = None              # Together AI uchun inglizcha tavsif
 
 
-class FontPair(BaseModel):
-    heading: str = "Calibri"
-    body: str = "Calibri"
+class Theme(BaseModel):
+    """Butun taqdimot bo'yicha izchil rang va shrift palitrasI."""
+    primary: str      # asosiy to'q rang, hex
+    accent: str       # yorqin highlight rang, hex
+    light: str        # açiq/oq tona, hex
+    heading_font: str = "Calibri"
+    body_font: str = "Calibri"
 
 
-class CardItem(BaseModel):
-    heading: str
-    body: str
-    example: Optional[str] = None
-
-
-class ChartPoint(BaseModel):
-    """XY diagrammasi yoki bar chart uchun bitta ma'lumot nuqtasi."""
-    label: str               # X o'qi yoki bar nomi
-    value: float             # Y qiymati
-
-
-class ChartData(BaseModel):
-    """bar_chart va xy_chart layoutlari uchun diagramma ma'lumotlari."""
-    x_label: str             # X o'qi sarlavhasi
-    y_label: str             # Y o'qi sarlavhasi
-    unit: str = ""           # Y birlik (masalan: %, mln, °C)
-    points: List[ChartPoint] # Ma'lumot nuqtalari (kamida 3 ta)
-
-
-class MathBlock(BaseModel):
-    """math_formula layouti uchun bitta formula bloki."""
-    formula: str             # Formulaning matn ko'rinishi, masalan: "E = mc²"
-    description: str         # Formulaning izohi (1-2 jumla)
+class SlideCanvas(BaseModel):
+    """AI tomonidan erkin loyihalangan slayd kanvasi."""
+    background: str                # fon rangi hex
+    elements: List[VisualElement]  # elementlar pastdan yuqoriga chiziladi
 
 
 class Slide(BaseModel):
     index: int
     role: Role
-    layout_type: str
-    title: Optional[str] = None
-    hook_line: Optional[str] = None
-    subtitle: Optional[str] = None
-    body: Optional[str] = None
-    items: Optional[List[CardItem]] = None
-    image_prompt: Optional[str] = None
-    key_takeaways: Optional[List[str]] = None
-    closing_thought: Optional[str] = None
-    # Yangi diagramma/formula maydonlari
-    chart_data: Optional[ChartData] = None
-    math_blocks: Optional[List[MathBlock]] = None
+    title: str      # QA uchun sarlavha matni
+    key_text: str   # QA uchun asosiy mazmun qisqacha
+
+    canvas: SlideCanvas
 
     def all_text(self) -> str:
-        parts = [self.title, self.hook_line, self.subtitle, self.body, self.closing_thought]
-        if self.items:
-            for it in self.items:
-                parts += [it.heading, it.body, it.example]
-        if self.key_takeaways:
-            parts += self.key_takeaways
-        if self.math_blocks:
-            for mb in self.math_blocks:
-                parts += [mb.formula, mb.description]
+        parts = [self.title, self.key_text]
+        for el in (self.canvas.elements or []):
+            if el.type == "text" and el.text:
+                parts.append(el.text)
         return " ".join([p for p in parts if p])
 
 
 class Brief(BaseModel):
     topic: str
-    palette: Palette
-    font_pair: FontPair
-    motif: Literal["icon_circle", "numbered_badge", "rounded_frame"] = "numbered_badge"
+    theme: Theme
     slides: List[Slide]
 
     @field_validator("slides")
     @classmethod
-    def check_roles_and_layouts(cls, slides: List[Slide]):
+    def check_roles(cls, slides: List[Slide]):
         if not slides:
             raise ValueError("Slaydlar ro'yxati bo'sh")
-
-        # 1) role ketma-ketligi orqaga qaytmasligi kerak
-        last_rank = -1
-        for s in slides:
-            rank = ROLE_ORDER.index(s.role)
-            if rank < last_rank:
-                raise ValueError(f"Role tartibi buzilgan: slayd {s.index} ({s.role}) oldingi rolelardan orqada")
-            last_rank = rank
-
-        # 2) hook faqat birinchi, synthesis faqat oxirgi slaydda
         if slides[0].role != "hook":
             raise ValueError("Birinchi slayd role='hook' bo'lishi shart")
         if slides[-1].role != "synthesis":
             raise ValueError("Oxirgi slayd role='synthesis' bo'lishi shart")
-
-        # 3) har slayd uchun layout_type shu role'ga ruxsat etilganmi
+        last_rank = -1
         for s in slides:
-            allowed = ALLOWED_LAYOUTS_BY_ROLE.get(s.role, set())
-            if s.layout_type not in allowed:
+            rank = ROLE_ORDER.index(s.role)
+            if rank < last_rank:
                 raise ValueError(
-                    f"Slayd {s.index}: layout_type='{s.layout_type}' role='{s.role}' uchun ruxsat etilmagan "
-                    f"(ruxsat etilganlar: {sorted(allowed)})"
+                    f"Role tartibi buzilgan: slayd {s.index} ({s.role}) oldingi roledan orqada"
                 )
-
-        # 4) ketma-ket ikki slayd bir xil layout ishlatmasin
-        for i in range(1, len(slides)):
-            if slides[i].layout_type == slides[i - 1].layout_type:
-                raise ValueError(
-                    f"Slayd {slides[i].index}: oldingi slayd bilan bir xil layout_type ('{slides[i].layout_type}') qaytarilgan"
-                )
-
+            last_rank = rank
         return slides
 
 
@@ -146,9 +91,7 @@ GROUNDING_PATTERN = re.compile(r"\d|(?:[A-ZЎҚҲЁ][a-zʻ'']+\s+[A-ZЎҚҲЁ][a
 
 
 def grounding_check(slide: Slide) -> bool:
-    """Slaydda kamida bitta raqam yoki atoqli ot (2 so'zli, bosh harfli ibora) borligini tekshiradi.
-    Faqat detail/comparison rolelariga qo'llaniladi."""
+    """detail/comparison slaydlarida kamida bitta raqam yoki atoqli ot bor-yo'qligini tekshiradi."""
     if slide.role not in ("detail", "comparison"):
         return True
-    text = slide.all_text()
-    return bool(GROUNDING_PATTERN.search(text))
+    return bool(GROUNDING_PATTERN.search(slide.all_text()))
