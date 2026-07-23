@@ -202,6 +202,65 @@ def _clean_json(raw: str) -> str:
     return cleaned
 
 
+def _salvage_partial_json(text: str) -> dict | None:
+    """Yarim qolgan JSON dan to'liq slaydlarni saqlab qolishga urinadi."""
+    try:
+        # "slides" arrayini topib, oxirgi to'liq elementgacha kesib olamiz
+        slides_start = text.find('"slides"')
+        if slides_start == -1:
+            return None
+        arr_start = text.find("[", slides_start)
+        if arr_start == -1:
+            return None
+
+        # To'liq slaydlarni bittama-bitta o'qib saqlaymiz
+        depth = 0
+        slides_json_end = arr_start
+        i = arr_start
+        last_good_end = arr_start + 1  # empty array fallback
+        while i < len(text):
+            ch = text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    last_good_end = i + 1  # bu slayd tugadi
+            elif ch == "]" and depth == 0:
+                slides_json_end = i
+                break
+            i += 1
+
+        slides_str = text[arr_start:last_good_end] + "]"
+        slides = json.loads(slides_str)
+        if not slides:
+            return None
+
+        # topic va theme ni olishga urinish
+        try:
+            prefix = text[:arr_start]
+            topic_match = re.search(r'"topic"\s*:\s*"([^"]+)"', prefix)
+            topic = topic_match.group(1) if topic_match else "Mavzu"
+
+            theme_start = prefix.find('"theme"')
+            theme = {"primary": "0D1117", "accent": "58A6FF", "light": "E8F4FD",
+                     "heading_font": "Calibri", "body_font": "Calibri"}
+            if theme_start != -1:
+                t_open = prefix.find("{", theme_start)
+                t_close = prefix.find("}", t_open)
+                if t_open != -1 and t_close != -1:
+                    theme = json.loads(prefix[t_open:t_close + 1])
+        except Exception:
+            topic = "Mavzu"
+            theme = {"primary": "0D1117", "accent": "58A6FF", "light": "E8F4FD",
+                     "heading_font": "Calibri", "body_font": "Calibri"}
+
+        return {"topic": topic, "theme": theme, "slides": slides}
+    except Exception as ex:
+        log.warning("Partial salvage muvaffaqiyatsiz: %s", ex)
+        return None
+
+
 def _call_openrouter(system_prompt: str, user_prompt: str, temperature: float = 0.9) -> dict:
     if not config.OPENROUTER_API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY topilmadi")
@@ -213,6 +272,7 @@ def _call_openrouter(system_prompt: str, user_prompt: str, temperature: float = 
     payload = {
         "model": config.OPENROUTER_TEXT_MODEL,
         "temperature": temperature,
+        "max_tokens": 16000,
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -227,6 +287,11 @@ def _call_openrouter(system_prompt: str, user_prompt: str, temperature: float = 
         return json.loads(cleaned)
     except json.JSONDecodeError as e:
         log.error("JSON parse xato. Xom javob (birinchi 2000 belgi): %s", raw[:2000])
+        # Partial JSON salvage: oxirgi to'liq slaydgacha kesib olishga urinish
+        salvaged = _salvage_partial_json(cleaned)
+        if salvaged:
+            log.warning("Partial JSON salvage muvaffaqiyatli: %d slayd", len(salvaged.get("slides", [])))
+            return salvaged
         raise
 
 
@@ -243,8 +308,8 @@ def generate_brief(topic: str) -> dict:
         "Yuqoridagi system qoidalar va bu narrativ burchakka qat'iy amal qilib, "
         "to'liq JSON brief tuz. Har bir slayd uchun NOYOB vizual kompozitsiya ixtiro qil — "
         "hech bir slayd boshqasiga o'xshamasin. "
-        "Slaydlar soni: 8–12 ta. "
-        "Har slaydda kamida 4–10 element bo'lsin. "
+        "Slaydlar soni: 7–9 ta (ortiqcha uzaytirma). "
+        "Har slaydda 4–8 element bo'lsin (ixcham saqlа). "
         "Agar mavzuda raqamlar bo'lsa, 'detail' yoki 'comparison' slaydida aniq raqam ko'rsat. "
         "Agar vizual tasvir kuchaytirsa, 'image' elementidan foydalan (1–2 ta slaydda)."
     )
