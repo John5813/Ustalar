@@ -31,7 +31,7 @@ async def handle_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     import asyncio
-    from .pipeline import generate_brief_with_validation, structural_validation_and_fix, build_presentation, run_visual_qa_and_fix
+    from .pipeline import generate_brief_with_validation, canvas_validation_and_fix, build_presentation, run_visual_qa_and_fix
     from .renderer import build_presentation as _build
 
     try:
@@ -45,7 +45,7 @@ async def handle_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         # 2 — Strukturaviy tekshiruv
-        brief = await loop.run_in_executor(None, structural_validation_and_fix, brief, topic)
+        brief = await loop.run_in_executor(None, canvas_validation_and_fix, brief, topic)
         await status_msg.edit_text(
             f"⚙️ \"{topic}\" mavzusida taqdimot tayyorlanmoqda...\n\n"
             f"✅ 1/4 — Brief tayyor ({len(brief.slides)} slayd)\n"
