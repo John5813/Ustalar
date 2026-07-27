@@ -421,14 +421,44 @@ async def premium_ppt_confirm(callback: CallbackQuery, state: FSMContext, db: Da
         pass
 
     filename = f"Premium_{topic[:30].replace(' ', '_')}.pptx"
-    with open(final_path, "rb") as f:
-        await callback.message.answer_document(document=f, filename=filename)
-
-    # Temp faylni o'chirish
     try:
-        os.remove(final_path)
-    except Exception:
-        pass
+        from aiogram.types import FSInputFile
+        document = FSInputFile(final_path, filename=filename)
+        await callback.message.answer_document(document=document)
+        logger.info("Premium taqdimot yuborildi: %s → %s", final_path, callback.from_user.id)
+    except Exception as send_err:
+        logger.exception("Premium taqdimot yuborishda xato: %s", send_err)
+        # Balansni qaytarish
+        await db.update_user_balance(callback.from_user.id, price)
+        send_err_msgs = {
+            "uz": (
+                f"❌ Fayl yuborishda xato yuz berdi.\n\n"
+                f"💰 {price:,} so'm hisobingizga qaytarildi.\n"
+                f"Qayta urinib ko'ring yoki admin bilan bog'laning."
+            ),
+            "ru": (
+                f"❌ Ошибка при отправке файла.\n\n"
+                f"💰 {price:,} сум возвращены на баланс.\n"
+                f"Попробуйте снова или обратитесь к администратору."
+            ),
+            "en": (
+                f"❌ Error sending the file.\n\n"
+                f"💰 {price:,} soʻm refunded to your balance.\n"
+                f"Please try again or contact the administrator."
+            ),
+        }
+        try:
+            await callback.message.answer(
+                send_err_msgs.get(lang, send_err_msgs["uz"]), parse_mode="HTML"
+            )
+        except Exception:
+            pass
+    finally:
+        # Temp faylni o'chirish
+        try:
+            os.remove(final_path)
+        except Exception:
+            pass
 
     await state.clear()
 
