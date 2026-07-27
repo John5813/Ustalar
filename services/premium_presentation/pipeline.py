@@ -154,7 +154,7 @@ def _enforce_role_order(slides_raw: list) -> list:
     return slides_raw
 
 
-def generate_brief_chunked(topic: str, target_count: int, progress_cb=None) -> Brief:
+def generate_brief_chunked(topic: str, target_count: int, progress_cb=None, level: int = 2) -> Brief:
     """Katta taqdimotni har 5 varoqlik bo'laklarda generatsiya qiladi.
     Har bo'lak avvalgi bo'lak xulosasi bilan mantiqiy bog'liq bo'ladi.
     """
@@ -162,7 +162,7 @@ def generate_brief_chunked(topic: str, target_count: int, progress_cb=None) -> B
 
     if target_count <= 7:
         # Kichik taqdimot — yagona prompt
-        return generate_brief_with_validation(topic, target_count)
+        return generate_brief_with_validation(topic, target_count, level=level)
 
     total_chunks = (target_count + CHUNK_SIZE - 1) // CHUNK_SIZE
     all_slides_raw: list = []
@@ -175,7 +175,7 @@ def generate_brief_chunked(topic: str, target_count: int, progress_cb=None) -> B
         is_first = chunk_num == 0
         is_last = remaining <= CHUNK_SIZE
 
-        log.info("Bo'lak %s/%s generatsiya: %s slayd", chunk_num + 1, total_chunks, chunk_size)
+        log.info("Bo'lak %s/%s generatsiya: %s slayd (daraja=%s)", chunk_num + 1, total_chunks, chunk_size, level)
         if progress_cb:
             progress_cb(chunk_num + 1, total_chunks)
 
@@ -190,6 +190,7 @@ def generate_brief_chunked(topic: str, target_count: int, progress_cb=None) -> B
                     is_first=is_first,
                     is_last=is_last,
                     prev_summary=prev_summary,
+                    level=level,
                 )
                 slides_raw = raw.get("slides", [])
                 if not slides_raw:
@@ -222,25 +223,37 @@ def generate_brief_chunked(topic: str, target_count: int, progress_cb=None) -> B
     if all_slides_raw:
         _enforce_role_order(all_slides_raw)
 
+    default_theme = {
+        "primary": "1B2A4A", "accent": "E8A020", "light": "F4F6F9",
+        "heading_font": "Calibri", "body_font": "Calibri",
+    }
     brief_dict = {
         "topic": topic,
-        "theme": first_theme or {
-            "primary": "1B2A4A", "accent": "E8A020", "light": "F4F6F9",
-            "heading_font": "Calibri", "body_font": "Calibri",
-        },
+        "theme": first_theme or default_theme,
         "slides": all_slides_raw,
     }
 
-    return Brief.model_validate(brief_dict)
+    try:
+        return Brief.model_validate(brief_dict)
+    except Exception as e:
+        log.error("Chunked brief validate xatosi, role-order qayta tuzatilmoqda: %s", e)
+        # Ikkinchi urinish — role-orderni qattiqroq tuzatib qayta validate
+        _enforce_role_order(all_slides_raw)
+        # Oxirgi 2 ta slayd synthesis bo'lishi mumkin — birini application qilish
+        for s in all_slides_raw[1:-1]:
+            if s.get("role") == "synthesis":
+                s["role"] = "application"
+        brief_dict["slides"] = all_slides_raw
+        return Brief.model_validate(brief_dict)
 
 
 def generate_brief_with_validation(topic: str, slide_count: int = 8,
-                                   max_attempts: int = 3) -> Brief:
+                                   max_attempts: int = 3, level: int = 2) -> Brief:
     """LLM'dan JSON so'raydi, pydantic orqali qat'iy tekshiradi. Silent fallback YO'Q."""
     last_error = None
     for attempt in range(1, max_attempts + 1):
         try:
-            raw = llm_client.generate_brief(topic, slide_count)
+            raw = llm_client.generate_brief(topic, slide_count, level=level)
             brief = Brief.model_validate(raw)
 
             for i, s in enumerate(brief.slides):

@@ -38,12 +38,55 @@ def _back_text(lang: str) -> str:
     return "🔙 Orqaga"
 
 
+LEVEL_LABELS = {
+    1: {"uz": "🏫 Maktab darsligi", "ru": "🏫 Школьный уровень", "en": "🏫 School level"},
+    2: {"uz": "🎓 Student", "ru": "🎓 Студент", "en": "🎓 Student"},
+    3: {"uz": "📚 Akademik", "ru": "📚 Академический", "en": "📚 Academic"},
+}
+
+
+def _client_name_keyboard(lang: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if lang == "ru":
+        builder.button(text="⏭ Пропустить", callback_data="prem_ppt_skip_name")
+        builder.button(text="🔙 Назад", callback_data="prem_ppt_back")
+    elif lang == "en":
+        builder.button(text="⏭ Skip", callback_data="prem_ppt_skip_name")
+        builder.button(text="🔙 Back", callback_data="prem_ppt_back")
+    else:
+        builder.button(text="⏭ Tashlab ketish", callback_data="prem_ppt_skip_name")
+        builder.button(text="🔙 Orqaga", callback_data="prem_ppt_back")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def _level_keyboard(lang: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if lang == "ru":
+        builder.button(text="🏫 1. Школьный уровень", callback_data="prem_ppt_level:1")
+        builder.button(text="🎓 2. Студент", callback_data="prem_ppt_level:2")
+        builder.button(text="📚 3. Академический", callback_data="prem_ppt_level:3")
+        builder.button(text="🔙 Назад", callback_data="prem_ppt_back_to_name")
+    elif lang == "en":
+        builder.button(text="🏫 1. School level", callback_data="prem_ppt_level:1")
+        builder.button(text="🎓 2. Student", callback_data="prem_ppt_level:2")
+        builder.button(text="📚 3. Academic", callback_data="prem_ppt_level:3")
+        builder.button(text="🔙 Back", callback_data="prem_ppt_back_to_name")
+    else:
+        builder.button(text="🏫 1. Maktab darsligi", callback_data="prem_ppt_level:1")
+        builder.button(text="🎓 2. Student", callback_data="prem_ppt_level:2")
+        builder.button(text="📚 3. Akademik", callback_data="prem_ppt_level:3")
+        builder.button(text="🔙 Orqaga", callback_data="prem_ppt_back_to_name")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def _slide_count_keyboard(lang: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for n in [5, 8, 10, 12, 15, 20]:
         price = _get_price(n)
         builder.button(text=f"{n} ta | {price:,} so'm", callback_data=f"prem_ppt_count:{n}")
-    builder.button(text=_back_text(lang), callback_data="prem_ppt_back")
+    builder.button(text=_back_text(lang), callback_data="prem_ppt_back_to_level")
     builder.adjust(2)
     return builder.as_markup()
 
@@ -117,19 +160,163 @@ async def premium_ppt_got_topic(message: Message, state: FSMContext, db: Databas
     topic = (message.text or "").strip()
 
     if len(topic) < 3:
-        await message.answer("❌ Mavzu juda qisqa. Kamida 3 ta belgi kiriting.")
+        short_msg = {
+            "uz": "❌ Mavzu juda qisqa. Kamida 3 ta belgi kiriting.",
+            "ru": "❌ Тема слишком короткая. Введите минимум 3 символа.",
+            "en": "❌ Topic too short. Enter at least 3 characters.",
+        }
+        await message.answer(short_msg.get(lang, short_msg["uz"]))
         return
 
     await state.update_data(topic=topic)
-    await state.set_state(PremiumPresentationStates.waiting_for_slide_count)
+    await state.set_state(PremiumPresentationStates.waiting_for_client_name)
 
     msgs = {
-        "uz": f"📋 Mavzu: <b>{topic}</b>\n\n📊 Necha slayd kerak?",
-        "ru": f"📋 Тема: <b>{topic}</b>\n\n📊 Сколько слайдов нужно?",
-        "en": f"📋 Topic: <b>{topic}</b>\n\n📊 How many slides do you need?",
+        "uz": (
+            f"📋 Mavzu: <b>{topic}</b>\n\n"
+            "👤 <b>Mijozning ism-familiyasini kiriting</b>\n"
+            "<i>(Taqdimotning sarlavha sahifasiga yoziladi)</i>"
+        ),
+        "ru": (
+            f"📋 Тема: <b>{topic}</b>\n\n"
+            "👤 <b>Введите имя и фамилию клиента</b>\n"
+            "<i>(Будет указано на титульном слайде)</i>"
+        ),
+        "en": (
+            f"📋 Topic: <b>{topic}</b>\n\n"
+            "👤 <b>Enter client's full name</b>\n"
+            "<i>(Will appear on the title slide)</i>"
+        ),
     }
     await message.answer(msgs.get(lang, msgs["uz"]), parse_mode="HTML",
-                         reply_markup=_slide_count_keyboard(lang))
+                         reply_markup=_client_name_keyboard(lang))
+
+
+# ──────────────────────────────────────────────────────────────── CLIENT NAME
+
+@router.message(PremiumPresentationStates.waiting_for_client_name)
+async def premium_ppt_got_name(message: Message, state: FSMContext, db: Database):
+    user = await db.get_user(message.from_user.id)
+    lang = user.language if user else "uz"
+    client_name = (message.text or "").strip()
+    await state.update_data(client_name=client_name)
+    await _show_level_step(message, state, lang, is_callback=False)
+
+
+@router.callback_query(F.data == "prem_ppt_skip_name")
+async def premium_ppt_skip_name(callback: CallbackQuery, state: FSMContext, db: Database):
+    await callback.answer()
+    user = await db.get_user(callback.from_user.id)
+    lang = user.language if user else "uz"
+    await state.update_data(client_name="")
+    await _show_level_step(callback, state, lang, is_callback=True)
+
+
+async def _show_level_step(source, state: FSMContext, lang: str, is_callback: bool):
+    await state.set_state(PremiumPresentationStates.waiting_for_level)
+    data = await state.get_data()
+    topic = data.get("topic", "")
+    msgs = {
+        "uz": (
+            f"📋 Mavzu: <b>{topic}</b>\n\n"
+            "📐 <b>Taqdimot qaysi daraja uchun?</b>\n\n"
+            "🏫 <b>1. Maktab darsligi</b>\n"
+            "   Bolalar uchun juda oddiy, hayotdan misollar\n\n"
+            "🎓 <b>2. Student</b>\n"
+            "   Tartibli, aniq ma'lumotlar, murakkablik o'rtacha\n\n"
+            "📚 <b>3. Akademik</b>\n"
+            "   Chuqur tahlil, ilmiy faktlar, professional til"
+        ),
+        "ru": (
+            f"📋 Тема: <b>{topic}</b>\n\n"
+            "📐 <b>Для какого уровня презентация?</b>\n\n"
+            "🏫 <b>1. Школьный уровень</b>\n"
+            "   Очень просто, примеры из жизни\n\n"
+            "🎓 <b>2. Студент</b>\n"
+            "   Структурировано, точные данные, средняя сложность\n\n"
+            "📚 <b>3. Академический</b>\n"
+            "   Глубокий анализ, научные факты, профессиональный язык"
+        ),
+        "en": (
+            f"📋 Topic: <b>{topic}</b>\n\n"
+            "📐 <b>What level is this presentation for?</b>\n\n"
+            "🏫 <b>1. School level</b>\n"
+            "   Very simple, real-life examples\n\n"
+            "🎓 <b>2. Student</b>\n"
+            "   Structured, accurate data, moderate complexity\n\n"
+            "📚 <b>3. Academic</b>\n"
+            "   Deep analysis, scientific facts, professional language"
+        ),
+    }
+    text = msgs.get(lang, msgs["uz"])
+    kb = _level_keyboard(lang)
+    if is_callback:
+        await source.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    else:
+        await source.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+# ──────────────────────────────────────────────────────────────── LEVEL
+
+@router.callback_query(F.data.startswith("prem_ppt_level:"))
+async def premium_ppt_got_level(callback: CallbackQuery, state: FSMContext, db: Database):
+    await callback.answer()
+    user = await db.get_user(callback.from_user.id)
+    lang = user.language if user else "uz"
+    level = int(callback.data.split(":")[1])
+    await state.update_data(level=level)
+    await state.set_state(PremiumPresentationStates.waiting_for_slide_count)
+
+    data = await state.get_data()
+    topic = data.get("topic", "")
+    level_label = LEVEL_LABELS.get(level, {}).get(lang, "")
+
+    msgs = {
+        "uz": f"📋 Mavzu: <b>{topic}</b>\n📐 Daraja: <b>{level_label}</b>\n\n📊 Necha slayd kerak?",
+        "ru": f"📋 Тема: <b>{topic}</b>\n📐 Уровень: <b>{level_label}</b>\n\n📊 Сколько слайдов нужно?",
+        "en": f"📋 Topic: <b>{topic}</b>\n📐 Level: <b>{level_label}</b>\n\n📊 How many slides do you need?",
+    }
+    await callback.message.edit_text(msgs.get(lang, msgs["uz"]), parse_mode="HTML",
+                                     reply_markup=_slide_count_keyboard(lang))
+
+
+@router.callback_query(F.data == "prem_ppt_back_to_name")
+async def premium_ppt_back_to_name(callback: CallbackQuery, state: FSMContext, db: Database):
+    """Daraja sahifasidan ism sahifasiga qaytish"""
+    await callback.answer()
+    user = await db.get_user(callback.from_user.id)
+    lang = user.language if user else "uz"
+    await state.set_state(PremiumPresentationStates.waiting_for_client_name)
+    data = await state.get_data()
+    topic = data.get("topic", "")
+    msgs = {
+        "uz": (
+            f"📋 Mavzu: <b>{topic}</b>\n\n"
+            "👤 <b>Mijozning ism-familiyasini kiriting</b>\n"
+            "<i>(Taqdimotning sarlavha sahifasiga yoziladi)</i>"
+        ),
+        "ru": (
+            f"📋 Тема: <b>{topic}</b>\n\n"
+            "👤 <b>Введите имя и фамилию клиента</b>\n"
+            "<i>(Будет указано на титульном слайде)</i>"
+        ),
+        "en": (
+            f"📋 Topic: <b>{topic}</b>\n\n"
+            "👤 <b>Enter client's full name</b>\n"
+            "<i>(Will appear on the title slide)</i>"
+        ),
+    }
+    await callback.message.edit_text(msgs.get(lang, msgs["uz"]), parse_mode="HTML",
+                                     reply_markup=_client_name_keyboard(lang))
+
+
+@router.callback_query(F.data == "prem_ppt_back_to_level")
+async def premium_ppt_back_to_level(callback: CallbackQuery, state: FSMContext, db: Database):
+    """Slayd soni sahifasidan daraja sahifasiga qaytish"""
+    await callback.answer()
+    user = await db.get_user(callback.from_user.id)
+    lang = user.language if user else "uz"
+    await _show_level_step(callback, state, lang, is_callback=True)
 
 
 # ──────────────────────────────────────────────────────────────── SLIDE COUNT
@@ -144,13 +331,23 @@ async def premium_ppt_got_count(callback: CallbackQuery, state: FSMContext, db: 
     price = _get_price(slide_count)
     data = await state.get_data()
     topic = data.get("topic", "")
+    client_name = data.get("client_name", "")
+    level = data.get("level", 2)
+    level_label = LEVEL_LABELS.get(level, {}).get(lang, "")
 
     await state.update_data(slide_count=slide_count, price=price)
 
+    name_line = {
+        "uz": f"👤 Mijoz: <b>{client_name}</b>\n" if client_name else "",
+        "ru": f"👤 Клиент: <b>{client_name}</b>\n" if client_name else "",
+        "en": f"👤 Client: <b>{client_name}</b>\n" if client_name else "",
+    }
     msgs = {
         "uz": (
             f"⭐ <b>Premium Taqdimot</b>\n\n"
             f"📋 Mavzu: <b>{topic}</b>\n"
+            f"{name_line['uz']}"
+            f"📐 Daraja: <b>{level_label}</b>\n"
             f"📊 Slaydlar: <b>{slide_count} ta</b>\n"
             f"💰 Narx: <b>{price:,} so'm</b>\n\n"
             f"Hisobingizdan yechiladi. Tasdiqlaysizmi?"
@@ -158,6 +355,8 @@ async def premium_ppt_got_count(callback: CallbackQuery, state: FSMContext, db: 
         "ru": (
             f"⭐ <b>Премиум Презентация</b>\n\n"
             f"📋 Тема: <b>{topic}</b>\n"
+            f"{name_line['ru']}"
+            f"📐 Уровень: <b>{level_label}</b>\n"
             f"📊 Слайдов: <b>{slide_count}</b>\n"
             f"💰 Цена: <b>{price:,} сум</b>\n\n"
             f"Будет списано с вашего баланса. Подтверждаете?"
@@ -165,6 +364,8 @@ async def premium_ppt_got_count(callback: CallbackQuery, state: FSMContext, db: 
         "en": (
             f"⭐ <b>Premium Presentation</b>\n\n"
             f"📋 Topic: <b>{topic}</b>\n"
+            f"{name_line['en']}"
+            f"📐 Level: <b>{level_label}</b>\n"
             f"📊 Slides: <b>{slide_count}</b>\n"
             f"💰 Price: <b>{price:,} soʻm</b>\n\n"
             f"Will be deducted from your balance. Confirm?"
@@ -184,11 +385,13 @@ async def premium_ppt_recount(callback: CallbackQuery, state: FSMContext, db: Da
     lang = user.language if user else "uz"
     data = await state.get_data()
     topic = data.get("topic", "")
+    level = data.get("level", 2)
+    level_label = LEVEL_LABELS.get(level, {}).get(lang, "")
 
     msgs = {
-        "uz": f"📋 Mavzu: <b>{topic}</b>\n\n📊 Necha slayd kerak?",
-        "ru": f"📋 Тема: <b>{topic}</b>\n\n📊 Сколько слайдов нужно?",
-        "en": f"📋 Topic: <b>{topic}</b>\n\n📊 How many slides do you need?",
+        "uz": f"📋 Mavzu: <b>{topic}</b>\n📐 Daraja: <b>{level_label}</b>\n\n📊 Necha slayd kerak?",
+        "ru": f"📋 Тема: <b>{topic}</b>\n📐 Уровень: <b>{level_label}</b>\n\n📊 Сколько слайдов нужно?",
+        "en": f"📋 Topic: <b>{topic}</b>\n📐 Level: <b>{level_label}</b>\n\n📊 How many slides do you need?",
     }
     await callback.message.edit_text(msgs.get(lang, msgs["uz"]), parse_mode="HTML",
                                      reply_markup=_slide_count_keyboard(lang))
@@ -206,6 +409,8 @@ async def premium_ppt_confirm(callback: CallbackQuery, state: FSMContext, db: Da
     topic = data.get("topic", "")
     slide_count = data.get("slide_count", 10)
     price = data.get("price", 15000)
+    level = data.get("level", 2)
+    client_name = data.get("client_name", "")
 
     # Balans tekshirish
     if user.balance < price:
@@ -299,9 +504,10 @@ async def premium_ppt_confirm(callback: CallbackQuery, state: FSMContext, db: Da
         )
         from services.premium_presentation.renderer import build_presentation
 
-        # 1 — Brief yaratish
+        # 1 — Brief yaratish (level va client_name uzatiladi)
         brief = await loop.run_in_executor(
-            None, generate_brief_chunked, topic, slide_count, progress_cb
+            None,
+            lambda: generate_brief_chunked(topic, slide_count, progress_cb, level=level)
         )
 
         step2 = {

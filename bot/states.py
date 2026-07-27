@@ -90,6 +90,8 @@ class TestStates(StatesGroup):
 
 class PremiumPresentationStates(StatesGroup):
     waiting_for_topic = State()
+    waiting_for_client_name = State()
+    waiting_for_level = State()
     waiting_for_slide_count = State()
     generating = State()
 

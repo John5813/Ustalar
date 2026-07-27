@@ -341,26 +341,66 @@ def _call_openrouter(system_prompt: str, user_prompt: str, temperature: float = 
         raise
 
 
+# ─────────────────────────────────────────── DARAJA INSTRUCTIONLARI
+
+LEVEL_INSTRUCTIONS = {
+    1: (
+        "DARAJA: MAKTAB DARSLIGI (bolalar uchun)\n"
+        "• Tilni JUDA oddiy yoz — 10-14 yoshli o'quvchi tushunadigan so'zlar\n"
+        "• Har murakkab g'oyani kundalik hayotdan olingan sodda misol bilan tushuntir\n"
+        "• Ilmiy atamalar ishlatma; agar kerak bo'lsa, darhol oddiy tilda izohlat\n"
+        "• Har slaydda BITTA asosiy g'oya — ko'p ma'lumot yuklamaslik\n"
+        "• 'Bu shuni anglatadi...', 'Tasavvur qiling...', 'Masalan...' kabi iboralar ko'p ishlatilsin\n"
+        "• Qisqa jumlalar (10-12 so'zdan oshmasin), do'stona ton\n"
+        "• Rasmlar va vizual element ko'proq, text kamroq — bolalar uchun vizual muhim\n"
+        "• Mavzuni chuqur tushuntir — sodda til bilan, lekin to'liq"
+    ),
+    2: (
+        "DARAJA: STUDENT (oliy ta'lim)\n"
+        "• Tartibli, mantiqiy tuzilma: kirish → nazariya → misollar → xulosa\n"
+        "• Aniq ma'lumotlar va raqamlar, iloji bo'lsa manba bilan\n"
+        "• Atamalar ishlatilsin, lekin birinchi marta qo'llanilganda qisqacha tushuntirma berilsin\n"
+        "• Har slayd mavzuning bir jihatini chuqur yoritsin — umumiy gap emas\n"
+        "• Professional, lekin haddan tashqari akademik emas — o'quvchiga qulay\n"
+        "• Grafik/jadval kerak joyda ishlatilsin — ma'lumotni ko'rsatish uchun\n"
+        "• Mavzuni to'liq tushuntir: 'nima', 'nima uchun', 'qanday' savollariga javob ber"
+    ),
+    3: (
+        "DARAJA: AKADEMIK (ilmiy/professional)\n"
+        "• Ilmiy uslub — aniq faktlar, statistika, terminologiya\n"
+        "• Har g'oya dalil va manba bilan asoslansin (agar umumiy bilim bo'lsa — aniq izohlat)\n"
+        "• Metodologiya, tahlil, xulosa aniq ajratilsin va ketma-ketlikda kelsin\n"
+        "• Terminologiya to'g'ri, to'liq va izchil ishlatilsin\n"
+        "• Har slaydda kamida bitta aniq ilmiy fakt, raqam yoki tadqiqot natijasi\n"
+        "• Formal akademik til — his-tuyg'u emas, dalil asosidagi bayonot\n"
+        "• Mavzuni eng chuqur darajada yoritsin: sabab, mexanizm, ta'sir, xulosa"
+    ),
+}
+
+
 # ─────────────────────────────────────────── ASOSIY FUNKSIYALAR
 
-def _base_rules(topic: str, slide_count: int) -> str:
+def _base_rules(topic: str, slide_count: int, level: int = 2) -> str:
     """Barcha brief va chunk promptlari uchun umumiy qoidalar."""
+    level_instr = LEVEL_INSTRUCTIONS.get(level, LEVEL_INSTRUCTIONS[2])
     return (
         f"• Slaydlar soni: AYNAN {slide_count} ta\n"
         "• Har slaydda KAMIDA 80 so'z matn\n"
+        "• ASOSIY MAQSAD: mavzuni chuqur tushuntirish — har slayd bitta jihatni to'liq ochsin\n"
+        "• Hozirgi kun bilan keraksiz taqqoslash QILMA — mavzuning o'zini yorit\n"
         "• Mavzuga mos ma'lumotlar — global statistika faqat kerak bo'lganda\n"
         "• Matn formati (bullet/paragraf) mazmunga qarab tanlangsin\n"
         "• Rang kontrasti qat'iy: to'q fon → oq matn, och fon → to'q matn\n"
-        "• key_text har slayd uchun kamida 3 ta to'liq jumla\n"
-        f"• Har 6 slaydda KAMIDA 1 ta [F] layout: chap-matn o'ng-rasm (agar mavzu vizuallikka mos)\n"
+        "• key_text har slayd uchun kamida 3 ta to'liq, mazmunli jumla\n"
+        f"• Har 6 slaydda KAMIDA 1 ta image element (agar mavzu vizuallikka mos)\n"
         "• Diagramma (chart): FAQAT raqamli/ilmiy/statistik mavzularda va FAQAT kerak joyda\n"
         "  Falsafiy, adabiy, ijodiy mavzularda diagramma MUTLAQO kerak emas\n"
         "  Diagramma qo'shsang — 'caption' maydoni MAJBURIY to'ldirsin\n"
-        "• Vizual tasvir kerak bo'lsa image element (20–30 so'zli inglizcha prompt)"
+        f"\n{level_instr}"
     )
 
 
-def generate_brief(topic: str, slide_count: int = 8) -> dict:
+def generate_brief(topic: str, slide_count: int = 8, level: int = 2) -> dict:
     angle_name, angle_desc = random.choice(_NARRATIVE_ANGLES)
 
     user_prompt = (
@@ -368,7 +408,7 @@ def generate_brief(topic: str, slide_count: int = 8) -> dict:
         f"NARRATIV YONDASHUV: «{angle_name}»\n"
         f"{angle_desc}\n\n"
         "Qoidalar:\n"
-        + _base_rules(topic, slide_count)
+        + _base_rules(topic, slide_count, level)
     )
     return _call_openrouter(SYSTEM_PROMPT_BRIEF, user_prompt, temperature=0.72)
 
@@ -381,6 +421,7 @@ def generate_brief_chunk(
     is_first: bool,
     is_last: bool,
     prev_summary: str | None,
+    level: int = 2,
 ) -> dict:
     """Taqdimotning bir bo'lagini (chunk_size ta slayd) generatsiya qiladi."""
     if is_first:
@@ -413,7 +454,7 @@ def generate_brief_chunk(
         f"{prev_ctx}\n"
         f"{role_hint}\n\n"
         "Qoidalar:\n"
-        + _base_rules(topic, chunk_size) +
+        + _base_rules(topic, chunk_size, level) +
         "\n• Avvalgi bo'lak bilan takrorlanmaslik — yangi g'oyalar, yangi faktlar\n"
         "• Mantiqiy bog'lanish: avvalgi slaydlar mavzusini davom ettir"
     )
