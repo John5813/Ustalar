@@ -1,0 +1,1810 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Editor</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  /* Light theme — explicitly white so we don't inherit Telegram's dark theme. */
+  --bg:#f5f5f7;
+  --bg2:#ffffff;
+  --text:#1a1a1a;
+  --hint:#6b7280;
+  --btn:#3b82f6;
+  --btn-text:#ffffff;
+  --success:#22c55e;
+  --border:rgba(0,0,0,.08);
+  --soft:rgba(0,0,0,.05);
+  --soft2:rgba(0,0,0,.10);
+}
+html,body{overscroll-behavior:none;-webkit-overflow-scrolling:auto;touch-action:manipulation}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+
+/* ─── LOADING ─────────────────────────────── */
+#loading{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:var(--bg);z-index:99}
+.spinner{width:36px;height:36px;border:3px solid rgba(0,0,0,.08);border-top-color:var(--btn);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#load-text{font-size:14px;color:var(--hint)}
+
+/* ─── HEADER ──────────────────────────────── */
+#header{display:none;align-items:center;justify-content:space-between;padding:9px 16px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0;gap:8px}
+#topic-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;opacity:.9}
+#slide-counter{font-size:12px;color:var(--hint);white-space:nowrap;flex-shrink:0}
+
+/* ─── PPTX EDITOR ─────────────────────────── */
+#pptx-editor{display:none;flex:1;flex-direction:column;overflow:hidden;background:var(--bg)}
+#slide-wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:8px;min-height:0;position:relative}
+#slide-viewport{position:relative;width:100%;aspect-ratio:16/9;border-radius:10px;overflow:hidden;box-shadow:0 4px 18px rgba(0,0,0,.18);background:#fff}
+#slide-canvas{position:absolute;inset:0}
+#edit-hint{position:absolute;top:14px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.55);color:#fff;padding:5px 12px;border-radius:14px;font-size:11px;pointer-events:none;opacity:.85;backdrop-filter:blur(4px);white-space:nowrap;z-index:5;transition:opacity .35s}
+#edit-hint.hide{opacity:0}
+
+/* Shapes — clean, no dashed borders by default */
+.s-shape{position:absolute;overflow:hidden;touch-action:none;border-radius:2px;transition:box-shadow .15s,outline .15s}
+/* Text shapes need touch-action:auto so Android Chrome will route the tap to
+   the contenteditable child and raise the soft keyboard. */
+.s-shape.is-text{cursor:text;touch-action:auto}
+.s-shape.is-image,.s-shape.is-bg,.s-shape.is-table{cursor:pointer}
+.s-shape:hover:not(.is-editing):not(.is-dragging){box-shadow:inset 0 0 0 1px rgba(59,130,246,.45)}
+.s-shape.is-edited{box-shadow:inset 0 0 0 1.5px var(--success)}
+.s-shape.is-editing{box-shadow:0 0 0 2px var(--btn),0 4px 18px rgba(59,130,246,.35);z-index:60}
+.s-shape.is-dragging{outline:2px solid rgba(59,130,246,.85);outline-offset:-1px;z-index:50;opacity:.88;cursor:grabbing;box-shadow:none}
+
+.s-img{width:100%;height:100%;display:block;object-fit:contain;pointer-events:none;background:transparent}
+/* Backgrounds fill the slide edge-to-edge — match how PowerPoint renders them. */
+.s-shape.is-bg .s-img{object-fit:cover}
+
+/* Text shape: transparent by default, edit chrome only on focus */
+.s-text-wrap{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-start;padding:3% 4%;background:transparent;border-radius:2px;outline:none;-webkit-user-select:text;user-select:text;cursor:text;touch-action:auto;-webkit-touch-callout:default}
+.s-text-wrap:focus{overflow-y:auto;background:rgba(255,255,255,.92);box-shadow:inset 0 0 0 1.5px var(--btn);cursor:text}
+/* Keep paragraphs un-editable wrapper-style siblings; the parent wrap is the
+   editable surface so caret behavior matches a textarea. */
+.s-text-wrap .s-para{pointer-events:none}
+.s-text-wrap:focus .s-para{pointer-events:auto}
+.s-para{line-height:1.35;word-break:break-word;white-space:pre-wrap;outline:none}
+
+/* Table shape: real table look — fills come from PPTX data when present, else transparent */
+.s-tbl-preview{width:100%;height:100%;background:transparent;border-radius:2px;overflow:hidden;display:flex;flex-direction:column}
+.s-tbl-preview-row{display:flex;flex:1;min-height:0}
+.s-tbl-preview-cell{flex:1;border:0.6px solid rgba(0,0,0,.55);overflow:hidden;display:flex;align-items:center;justify-content:center;padding:1px 2px;min-width:0;background:transparent}
+.s-tbl-preview-cell.cell-changed{box-shadow:inset 0 0 0 2px rgba(34,197,94,.7)}
+.s-tbl-preview-cell span{overflow:hidden;white-space:normal;word-break:break-word;width:100%;line-height:1.1;display:-webkit-box;-webkit-box-orient:vertical;text-overflow:clip}
+/* Header row only gets a generic blue tint as a *fallback* when the entire
+   header row had no fills in the source PPTX. If ANY header cell has a fill,
+   the row is tagged so the rest stay transparent and read like a real table. */
+.s-tbl-preview-row:first-child:not([data-row-has-fill]) .s-tbl-preview-cell:not([data-fill]){background:rgba(59,130,246,.14)}
+.s-tbl-preview-row:first-child .s-tbl-preview-cell{font-weight:bold}
+
+/* Tiny corner badge — pinned to the top-left and nudged half outside the shape
+   bounds so it never sits on top of the first column / header content. Fades
+   itself out after a moment so the user only sees it briefly when content
+   loads or changes; hover (or :focus-within while editing) brings it back. */
+.s-badge{position:absolute;top:2px;left:2px;background:rgba(0,0,0,.55);color:#fff;font-size:9px;padding:1px 4px;border-radius:7px;pointer-events:none;display:flex;align-items:center;gap:2px;line-height:1.1;backdrop-filter:blur(3px);opacity:.85;transition:opacity .45s ease;z-index:2}
+.s-badge.faded{opacity:0}
+.s-shape:hover .s-badge,.s-shape.is-editing .s-badge{opacity:1!important}
+.s-badge.bg-badge{top:auto;bottom:2px;left:2px;background:rgba(180,90,0,.7)}
+.s-badge.edited-badge{background:var(--success);opacity:1}
+
+/* ─── ACTION BAR ─────────────────────────── */
+#action-bar{display:none;align-items:center;padding:6px 10px;background:var(--bg2);border-top:1px solid var(--border);gap:8px;flex-shrink:0;justify-content:center;flex-wrap:wrap}
+.act-btn{height:34px;padding:0 14px;border:none;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:4px;white-space:nowrap;flex-shrink:0;background:var(--soft);color:var(--text)}
+.act-btn:active{opacity:.7}
+.act-btn:disabled{opacity:.3}
+.act-btn.act-templates{background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;height:34px;padding:0 14px;font-weight:700}
+
+/* ─── TEMPLATES MODAL ────────────────────── */
+#tpl-modal{display:none;position:fixed;inset:0;z-index:250;background:rgba(0,0,0,.55);backdrop-filter:blur(6px);flex-direction:column}
+.tpl-box{background:var(--bg2);position:fixed;inset:0;top:48px;border-radius:16px 16px 0 0;display:flex;flex-direction:column;overflow:hidden;width:100%;z-index:251}
+.tpl-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border);flex-shrink:0;gap:8px}
+.tpl-header-title{font-size:15px;font-weight:700;display:flex;align-items:center;gap:6px}
+.tpl-close{width:32px;height:32px;border:none;background:var(--soft);color:var(--text);border-radius:8px;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.tpl-scope{display:flex;gap:6px;padding:10px 16px 6px;flex-shrink:0;flex-wrap:wrap}
+.tpl-scope-btn{flex:1;min-width:140px;padding:10px;border:1.5px solid var(--border);background:var(--soft);color:var(--text);border-radius:10px;font-size:12px;font-weight:600;cursor:pointer;text-align:center}
+.tpl-scope-btn.active{background:rgba(99,102,241,.12);border-color:#8b5cf6;color:#4c1d95}
+#tpl-grid-wrap{flex:1;overflow-y:auto;padding:8px 12px 12px;-webkit-overflow-scrolling:touch}
+#tpl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px}
+.tpl-card{position:relative;aspect-ratio:16/9;border-radius:8px;overflow:hidden;cursor:pointer;border:2px solid transparent;background:#eee;transition:border-color .15s,transform .12s;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.tpl-card.gallery{border:2px dashed rgba(0,0,0,.18);background:var(--soft);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:var(--text)}
+.tpl-card.gallery .tpl-icon{font-size:22px}
+.tpl-card.gallery .tpl-label{font-size:11px;font-weight:600;color:var(--hint);padding:0 6px;text-align:center}
+.tpl-card img{width:100%;height:100%;object-fit:cover;display:block}
+.tpl-card:active{transform:scale(.97)}
+.tpl-card.applied{border-color:var(--success)}
+.tpl-card-name{position:absolute;left:0;right:0;bottom:0;background:linear-gradient(to top,rgba(0,0,0,.78),transparent);color:#fff;font-size:10px;font-weight:600;padding:10px 6px 4px;text-align:center;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#tpl-file-input{display:none}
+.tpl-loading{padding:30px;text-align:center;color:var(--hint);font-size:13px}
+
+/* ─── SLIDE THUMBNAIL STRIP ──────────────── */
+#slide-nav{display:flex;align-items:center;padding:10px 10px 12px;background:var(--bg2);border-top:1px solid var(--border);flex-shrink:0;gap:8px;box-shadow:0 -2px 8px rgba(0,0,0,.04)}
+.nav-btn{width:42px;height:64px;border:none;background:var(--soft);color:var(--text);border-radius:10px;font-size:18px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.nav-btn:active{background:var(--soft2)}
+.nav-btn:disabled{opacity:.25}
+#thumb-strip{flex:1;display:flex;gap:8px;align-items:center;overflow-x:auto;overflow-y:hidden;padding:2px 4px;-webkit-overflow-scrolling:touch;scroll-behavior:smooth;scrollbar-width:none}
+#thumb-strip::-webkit-scrollbar{display:none}
+.thumb{position:relative;width:104px;height:60px;flex-shrink:0;border-radius:7px;background:#e5e7eb;border:2px solid transparent;cursor:pointer;overflow:hidden;transition:border-color .15s,transform .12s,box-shadow .15s;touch-action:pan-x;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.thumb.dragging{touch-action:none}
+/* Drag-lock: while a thumbnail drag is in progress, freeze the rest of the
+   UI so a sideways finger move only moves the ghost — not the strip,
+   not the page, not other taps. */
+body.drag-lock{touch-action:none;overflow:hidden;-webkit-user-select:none;user-select:none}
+body.drag-lock #thumb-strip{overflow:hidden;touch-action:none}
+body.drag-lock #slide-wrap,
+body.drag-lock #action-bar,
+body.drag-lock #header,
+body.drag-lock #footer,
+body.drag-lock .nav-btn,
+body.drag-lock #tbl-modal,
+body.drag-lock #text-modal,
+body.drag-lock #tpl-modal,
+body.drag-lock #img-modal{pointer-events:none!important}
+.thumb.active{border-color:var(--btn);transform:scale(1.05);box-shadow:0 3px 10px rgba(59,130,246,.3)}
+.thumb-num{position:absolute;top:2px;left:4px;font-size:11px;color:#fff;font-weight:700;background:rgba(0,0,0,.55);padding:1px 5px;border-radius:8px;line-height:1.2;letter-spacing:.2px;backdrop-filter:blur(2px)}
+.thumb-edited{position:absolute;top:3px;right:4px;width:8px;height:8px;border-radius:50%;background:var(--success);box-shadow:0 0 0 1.5px #fff}
+.thumb canvas{width:100%;height:100%;display:block}
+
+/* ─── TABLE MODAL ────────────────────────── */
+#tbl-modal{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.55);backdrop-filter:blur(6px)}
+.tbl-box{background:var(--bg2);position:fixed;inset:0;top:52px;border-radius:16px 16px 0 0;display:flex;flex-direction:column;overflow:hidden;width:100%;z-index:201}
+.tbl-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border);flex-shrink:0}
+.tbl-header-title{font-size:15px;font-weight:700}
+.tbl-close{width:32px;height:32px;border:none;background:rgba(255,255,255,.08);color:var(--text);border-radius:8px;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.tbl-hint{font-size:12px;color:var(--hint);padding:6px 16px 2px;flex-shrink:0}
+#tbl-scroll{flex:1;overflow:auto;padding:8px 12px 16px;-webkit-overflow-scrolling:touch}
+.tbl-table{border-collapse:collapse;width:100%;min-width:300px}
+.tbl-table td{border:1px solid rgba(255,255,255,.12);padding:8px 10px;font-size:14px;color:var(--text);vertical-align:top;cursor:pointer;transition:background .12s;min-width:80px;white-space:normal;word-break:break-word;line-height:1.4;position:relative}
+.tbl-table tr:first-child td{background:rgba(59,130,246,.15);font-weight:700}
+.tbl-table td:active{background:rgba(59,130,246,.15)!important}
+.tbl-table td.changed{background:rgba(34,197,94,.08);border-color:var(--success)}
+.tbl-edit-icon{position:absolute;top:3px;right:4px;font-size:9px;opacity:.4}
+#tbl-done-btn{margin:0 12px 12px;padding:13px;background:var(--btn);color:var(--btn-text);border:none;border-radius:12px;font-size:15px;font-weight:600;cursor:pointer;flex-shrink:0}
+
+/* ─── DOCX EDITOR ────────────────────────── */
+#docx-editor{display:none;flex:1;overflow-y:auto;padding:12px 14px;-webkit-overflow-scrolling:touch;gap:12px;flex-direction:column}
+.doc-page{background:#fff;border-radius:10px;padding:28px 24px 24px;box-shadow:0 2px 16px rgba(0,0,0,.35)}
+.doc-para{border-radius:5px;padding:4px 7px;margin:2px -7px;cursor:text;transition:background .12s,box-shadow .15s,border-color .15s;line-height:1.65;color:#1a1a1a;outline:none;border:1.5px solid transparent;white-space:pre-wrap;word-break:break-word;min-height:1.65em}
+.doc-para:hover{background:rgba(59,130,246,.05)}
+.doc-para.editing{background:#fff;border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.18);cursor:text}
+.doc-para.edited{background:rgba(34,197,94,.08);border-left:2px solid var(--success);padding-left:9px}
+.doc-para.edited.editing{border-left:1.5px solid #3b82f6;padding-left:7px}
+.doc-para[contenteditable="true"]{user-select:text;-webkit-user-select:text}
+.page-num{text-align:right;font-size:11px;color:#aaa;margin-top:10px}
+
+/* Docx tables */
+.doc-table-wrap{margin:10px -7px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.doc-table{border-collapse:collapse;width:100%;min-width:280px;table-layout:fixed}
+.doc-table td{border:1px solid #c8c8c8;padding:6px 8px;font-size:13px;color:#1a1a1a;vertical-align:top;cursor:text;line-height:1.45;word-break:break-word;outline:none;transition:background .12s,box-shadow .15s;min-width:60px}
+.doc-table tr:first-child td{background:#eef4ff;font-weight:700}
+.doc-table td:hover{background:rgba(59,130,246,.06)}
+.doc-table td.editing{background:#fff;box-shadow:inset 0 0 0 2px #3b82f6}
+.doc-table td.edited{background:rgba(34,197,94,.10)}
+.doc-table td.editing.edited{box-shadow:inset 0 0 0 2px #3b82f6}
+
+/* Docx images */
+.doc-img-wrap{margin:12px 0;display:flex;justify-content:center;position:relative}
+.doc-img{max-width:100%;max-height:340px;border-radius:6px;box-shadow:0 1px 6px rgba(0,0,0,.18);cursor:pointer;transition:box-shadow .15s,transform .12s}
+.doc-img:hover{box-shadow:0 2px 14px rgba(59,130,246,.4)}
+.doc-img:active{transform:scale(.98)}
+.doc-img.edited{box-shadow:0 0 0 3px var(--success),0 1px 6px rgba(0,0,0,.18)}
+.doc-img-pill{position:absolute;top:8px;right:8px;background:rgba(0,0,0,.65);color:#fff;font-size:11px;padding:3px 8px;border-radius:10px;pointer-events:none;display:flex;align-items:center;gap:4px;font-weight:500}
+
+/* ─── FOOTER ──────────────────────────────── */
+#footer{display:none;padding:9px 14px;background:var(--bg2);border-top:1px solid var(--border);flex-shrink:0;flex-direction:column}
+#save-btn{width:100%;padding:13px;background:var(--btn);color:var(--btn-text);border:none;border-radius:12px;font-size:15px;font-weight:600;cursor:pointer}
+#save-btn:disabled{opacity:.4}
+#changes-badge{text-align:center;font-size:11px;color:var(--success);padding:4px 0 0;min-height:18px}
+
+/* ─── TEXT MODAL ─────────────────────────── */
+#text-modal{display:none;position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.55);backdrop-filter:blur(6px);flex-direction:column;align-items:center;justify-content:flex-end}
+.t-box{background:var(--bg2);border-radius:20px 20px 0 0;padding:14px 16px 24px;position:fixed;bottom:0;left:0;right:0;display:flex;flex-direction:column;gap:11px;box-shadow:0 -4px 24px rgba(0,0,0,.5);max-height:75dvh;width:100%}
+.t-handle{width:36px;height:4px;background:rgba(255,255,255,.18);border-radius:2px;margin:0 auto -2px}
+.t-title{font-size:14px;font-weight:600}
+#modal-textarea{flex:1;min-height:120px;max-height:38dvh;background:rgba(255,255,255,.05);color:var(--text);border:1.5px solid rgba(255,255,255,.12);border-radius:10px;padding:11px 13px;font-size:15px;line-height:1.55;resize:none;font-family:inherit;outline:none}
+#modal-textarea:focus{border-color:var(--btn)}
+.t-btns{display:flex;gap:9px}
+.t-btn{flex:1;padding:12px;border:none;border-radius:11px;font-size:15px;font-weight:600;cursor:pointer}
+.t-btn.cancel{background:rgba(255,255,255,.07);color:var(--text)}
+.t-btn.apply{background:var(--btn);color:var(--btn-text)}
+
+/* ─── IMG MODAL ──────────────────────────── */
+#img-modal{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.6);backdrop-filter:blur(6px);flex-direction:column;align-items:center;justify-content:flex-end}
+.i-box{background:var(--bg2);border-radius:20px 20px 0 0;padding:16px 16px 24px;position:fixed;bottom:0;left:0;right:0;display:flex;flex-direction:column;gap:12px;box-shadow:0 -4px 24px rgba(0,0,0,.5);width:100%}
+.i-handle{width:36px;height:4px;background:rgba(255,255,255,.18);border-radius:2px;margin:0 auto -4px}
+.i-title{font-size:14px;font-weight:600}
+#img-preview-el{width:100%;max-height:180px;border-radius:10px;object-fit:contain;background:#000;display:block}
+.i-btns{display:flex;gap:9px}
+#img-choose-btn{flex:1;padding:13px;background:var(--btn);color:var(--btn-text);border:none;border-radius:11px;font-size:15px;font-weight:600;cursor:pointer}
+#img-cancel-btn{padding:13px 16px;background:rgba(255,255,255,.07);color:var(--text);border:none;border-radius:11px;font-size:15px;cursor:pointer}
+#img-file-input{display:none}
+
+/* ─── SUCCESS / ERROR ────────────────────── */
+#success-screen,#error-screen{display:none;position:fixed;inset:0;flex-direction:column;align-items:center;justify-content:center;gap:13px;background:var(--bg);z-index:400;padding:24px}
+.big-icon{font-size:54px}
+.r-title{font-size:17px;font-weight:700}
+.r-sub{font-size:13px;color:var(--hint);text-align:center;line-height:1.55}
+#retry-btn{margin-top:6px;padding:12px 28px;background:var(--btn);color:var(--btn-text);border:none;border-radius:12px;font-size:15px;font-weight:600;cursor:pointer}
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <div id="load-text">Yuklanmoqda...</div>
+</div>
+
+<div id="header">
+  <div id="topic-title"></div>
+  <div id="slide-counter"></div>
+</div>
+
+<div id="pptx-editor">
+  <div id="slide-wrap">
+    <div id="slide-viewport">
+      <div id="slide-canvas"></div>
+    </div>
+    <div id="edit-hint"></div>
+  </div>
+  <div id="action-bar">
+    <button class="act-btn" id="btn-slide-left"  disabled>◀</button>
+    <button class="act-btn act-templates" id="btn-templates">🎨 Shablonlar</button>
+    <button class="act-btn" id="btn-slide-right" disabled>▶</button>
+  </div>
+  <div id="slide-nav">
+    <button class="nav-btn" id="prev-btn">◀</button>
+    <div id="thumb-strip"></div>
+    <button class="nav-btn" id="next-btn">▶</button>
+  </div>
+</div>
+
+<div id="docx-editor"></div>
+
+<div id="footer">
+  <button id="save-btn">💾 Saqlash</button>
+  <div id="changes-badge"></div>
+</div>
+
+<!-- Table modal (full view + edit) -->
+<div id="tbl-modal">
+  <div class="tbl-box">
+    <div class="tbl-header">
+      <div class="tbl-header-title" id="tbl-title">📊 Jadval</div>
+      <button class="tbl-close" id="tbl-close">✕</button>
+    </div>
+    <div class="tbl-hint" id="tbl-hint">Katak ustiga bosib tahrirlang</div>
+    <div id="tbl-scroll"><table class="tbl-table" id="tbl-table"></table></div>
+    <button id="tbl-done-btn">✓ Tayyor</button>
+  </div>
+</div>
+
+<!-- Text modal -->
+<div id="text-modal">
+  <div class="t-box">
+    <div class="t-handle"></div>
+    <div class="t-title" id="t-title">Matnni tahrirlash</div>
+    <textarea id="modal-textarea"></textarea>
+    <div class="t-btns">
+      <button class="t-btn cancel" id="t-cancel">Bekor</button>
+      <button class="t-btn apply"  id="t-apply">✓ Qo'llash</button>
+    </div>
+  </div>
+</div>
+
+<!-- Templates modal -->
+<div id="tpl-modal">
+  <div class="tpl-box">
+    <div class="tpl-header">
+      <div class="tpl-header-title">🎨 <span id="tpl-title">Shablonlar Kutubxonasi</span></div>
+      <button class="tpl-close" id="tpl-close">✕</button>
+    </div>
+    <div class="tpl-scope">
+      <button class="tpl-scope-btn active" id="tpl-scope-current">Faqat shu slaid</button>
+      <button class="tpl-scope-btn" id="tpl-scope-all">Hamma slaidlar</button>
+    </div>
+    <div id="tpl-grid-wrap">
+      <div id="tpl-grid"><div class="tpl-loading">Yuklanmoqda...</div></div>
+    </div>
+    <input type="file" id="tpl-file-input" accept="image/*">
+  </div>
+</div>
+
+<!-- Image modal -->
+<div id="img-modal">
+  <div class="i-box">
+    <div class="i-handle"></div>
+    <div class="i-title" id="i-title">📷 Rasmni almashtirish</div>
+    <img id="img-preview-el" src="" alt="">
+    <div class="i-btns">
+      <button id="img-cancel-btn">Bekor</button>
+      <button id="img-choose-btn">📷 Rasm tanlash</button>
+    </div>
+    <input type="file" id="img-file-input" accept="image/*">
+  </div>
+</div>
+
+<!-- Success -->
+<div id="success-screen">
+  <div class="big-icon">✅</div>
+  <div class="r-title" id="s-title">Yuborildi!</div>
+  <div class="r-sub"   id="s-sub">Tahrirlangan fayl chatga yuborildi</div>
+</div>
+
+<!-- Error -->
+<div id="error-screen">
+  <div class="big-icon">⚠️</div>
+  <div class="r-title">Xatolik</div>
+  <div class="r-sub" id="e-sub"></div>
+  <button id="retry-btn">Qayta urinish</button>
+</div>
+
+<script>
+const tg = window.Telegram?.WebApp;
+if(tg){
+  try{ tg.ready(); }catch(_){}
+  try{ tg.expand(); }catch(_){}
+  // Stop Telegram from interpreting vertical drags as "swipe-to-close" or
+  // "pull-to-refresh" — those gestures otherwise abort text editing.
+  try{ tg.disableVerticalSwipes && tg.disableVerticalSwipes(); }catch(_){}
+}
+// Block native browser pull-to-refresh / overscroll just in case.
+document.addEventListener('touchmove', e=>{
+  if(e.scale && e.scale!==1){ e.preventDefault(); }
+}, {passive:false});
+
+/* ── Unsaved-changes guard ─────────────────
+ * Warn the user before they close the Mini App / refresh / navigate back if
+ * they have pending edits. This prevents the most common data-loss scenario
+ * — accidental swipe-down to close the WebApp.
+ */
+let _saveInProgress = false;
+function _hasUnsaved(){ return !_saveInProgress && (typeof countChg === 'function') && countChg() > 0; }
+window.addEventListener('beforeunload', e=>{
+  if(_hasUnsaved()){
+    e.preventDefault();
+    // The string is largely ignored by modern browsers but required to trigger.
+    e.returnValue = '';
+    return '';
+  }
+});
+if(tg && tg.BackButton){
+  try{
+    tg.BackButton.show();
+    tg.BackButton.onClick(()=>{
+      if(_hasUnsaved()){
+        const msg = L==='ru'
+          ? 'Есть несохранённые изменения. Закрыть редактор?'
+          : L==='en'
+          ? 'You have unsaved changes. Close the editor?'
+          : "Saqlanmagan o'zgarishlar bor. Yopilsinmi?";
+        if(!window.confirm(msg)) return;
+      }
+      try{ tg.close(); }catch(_){}
+    });
+  }catch(_){}
+}
+
+/* ── i18n ─────────────────────────────────── */
+const lc = tg?.initDataUnsafe?.user?.language_code || 'uz';
+const L  = lc.startsWith('ru')?'ru':lc.startsWith('en')?'en':'uz';
+const i18n = {
+  uz:{loading:'Yuklanmoqda...',text_edit:'Matnni tahrirlash',cancel:'Bekor',apply:"✓ Qo'llash",
+      img_title:'Rasmni almashtirish',bg_title:'Orqa fonni almashtirish',choose_img:'📷 Rasm tanlash',
+      save:'💾 Saqlash',saving:'⏳ Yuborilmoqda...',n_changes:'%1 ta o\'zgartirish',
+      success_title:'Yuborildi!',success_sub:'Tahrirlangan fayl chatga yuborildi',
+      err_exp:'Token muddati o\'tgan. Yangi fayl oling.',err_save:'Saqlashda xatolik',
+      retry:'Qayta urinish',slide_of:'%1 / %2',
+      hint_edit:"Matnga bosib tahrirlang • Rasmga bosib almashtiring",
+      img_pill:'🖼️ Bosib almashtiring',
+      tbl_title:'📊 Jadval',tbl_hint:'Katak ustiga bosib tahrirlang',tbl_done:'✓ Tayyor',
+      tpl_btn:'🎨 Shablonlar',tpl_title:'Shablonlar Kutubxonasi',
+      tpl_scope_one:'Faqat shu slaid',tpl_scope_all:'Hamma slaidlar',
+      tpl_gallery:'📷 Galereyadan',tpl_loading:'Yuklanmoqda...'},
+  ru:{loading:'Загрузка...',text_edit:'Редактировать текст',cancel:'Отмена',apply:'✓ Применить',
+      img_title:'Заменить изображение',bg_title:'Заменить фон',choose_img:'📷 Выбрать фото',
+      save:'💾 Сохранить',saving:'⏳ Отправка...',n_changes:'Изменений: %1',
+      success_title:'Отправлено!',success_sub:'Файл отправлен в чат',
+      err_exp:'Токен истёк. Получите новый файл.',err_save:'Ошибка сохранения',
+      retry:'Повторить',slide_of:'%1 / %2',
+      hint_edit:'Нажмите на текст или картинку',
+      img_pill:'🖼️ Нажмите чтобы заменить',
+      tbl_title:'📊 Таблица',tbl_hint:'Нажмите на ячейку для редактирования',tbl_done:'✓ Готово',
+      tpl_btn:'🎨 Шаблоны',tpl_title:'Библиотека Шаблонов',
+      tpl_scope_one:'Только этот слайд',tpl_scope_all:'Все слайды',
+      tpl_gallery:'📷 Из галереи',tpl_loading:'Загрузка...'},
+  en:{loading:'Loading...',text_edit:'Edit text',cancel:'Cancel',apply:'✓ Apply',
+      img_title:'Replace image',bg_title:'Replace background',choose_img:'📷 Choose photo',
+      save:'💾 Save',saving:'⏳ Sending...',n_changes:'%1 changes',
+      success_title:'Sent!',success_sub:'Edited file sent to chat',
+      err_exp:'Token expired. Get a new file.',err_save:'Save error',
+      retry:'Retry',slide_of:'%1 / %2',
+      hint_edit:'Tap text or image to edit',
+      img_pill:'🖼️ Tap to replace',
+      tbl_title:'📊 Table',tbl_hint:'Tap a cell to edit',tbl_done:'✓ Done',
+      tpl_btn:'🎨 Templates',tpl_title:'Template Library',
+      tpl_scope_one:'This slide only',tpl_scope_all:'All slides',
+      tpl_gallery:'📷 From gallery',tpl_loading:'Loading...'},
+}[L];
+function tr(k,...a){let s=i18n[k]||k;a.forEach((v,i)=>s=s.replace(`%${i+1}`,v));return s;}
+
+/* Apply translations to static HTML elements as soon as we know the language —
+ * prevents the brief flash of Uzbek defaults for RU/EN users. */
+function applyStaticI18n(){
+  try{
+    const set=(id,k)=>{ const el=document.getElementById(id); if(el) el.textContent=tr(k); };
+    set('save-btn','save');
+    set('btn-templates','tpl_btn');
+    set('tbl-title','tbl_title');
+    set('tbl-hint','tbl_hint');
+    set('tbl-done-btn','tbl_done');
+    set('t-title','text_edit');
+    set('t-cancel','cancel');
+    set('t-apply','apply');
+    set('tpl-title','tpl_title');
+    set('tpl-scope-current','tpl_scope_one');
+    set('tpl-scope-all','tpl_scope_all');
+    set('i-title','img_title');
+    set('img-cancel-btn','cancel');
+    set('img-choose-btn','choose_img');
+    set('s-title','success_title');
+    set('s-sub','success_sub');
+  }catch(_){}
+}
+// Run on DOM ready (the script already executes after the relevant DOM nodes
+// because it's at the end of <body>, so call immediately).
+applyStaticI18n();
+
+/* ── Auth header (Telegram WebApp initData) ─ */
+function _authHeaders(){
+  // The server validates this via HMAC against BOT_TOKEN to confirm the
+  // requester really is the Telegram user who owns the edit token.
+  try{
+    const id = tg && tg.initData ? tg.initData : '';
+    return id ? {'X-Telegram-Init-Data': id} : {};
+  }catch(_){ return {}; }
+}
+
+/* ── State ───────────────────────────────── */
+const params = new URLSearchParams(location.search);
+const TOKEN  = params.get('token')||'';
+let fileType='pptx', slideData=null, docData=null;
+let displaySlides=[], curSlide=0;
+const vChg={};
+const bgChg={};        // pptx background changes: bgChg[slideOrigIdx] = {template_id} | {src:dataURL}
+const bgPreviewSrc={}; // resolved preview URL for thumbs/render: bgPreviewSrc[slideOrigIdx] = "url"
+let _tplScope='current';  // 'current' | 'all'
+const pChg={};
+const dtChg={}; // docx table changes: dtChg["t_idx_ri_ci"] = newText
+const dImgChg={}; // docx image changes: dImgChg[img_idx] = "data:image/jpeg;base64,..."
+const dpOrig={}; // original paragraph text by idx (for change detection)
+const dtOrig={}; // original docx cell text by "t_idx_ri_ci" (for change detection)
+
+// Text modal state
+let _mode=null;
+let _txtDispIdx=-1, _txtShapeKey=null, _docPara=null;
+// Table modal state
+let _tblDispIdx=-1, _tblShapeKey=null, _tblShape=null;
+let _tblCellRow=-1, _tblCellCol=-1;
+// Image modal state — _imgMode distinguishes 'pptx' vs 'docx'
+let _imgDispIdx=-1, _imgShapeKey=null, _imgMode='pptx', _imgDocIdx=-1, _imgDocEl=null;
+
+/* ── DOM ─────────────────────────────────── */
+const $=id=>document.getElementById(id);
+const VP=$('slide-viewport'), SC=$('slide-canvas'), saveBtn=$('save-btn');
+
+function show(el,flex=true){el.style.display=flex?'flex':'block';}
+function hide(el){el.style.display='none';}
+
+function countChg(){
+  let n=0;
+  for(const si in vChg){
+    const s=vChg[si];
+    for(const k in s){
+      if(s[k].type==='table') n+=Object.keys(s[k].cells||{}).length;
+      else n++;
+    }
+  }
+  n+=Object.keys(pChg).length;
+  n+=Object.keys(dtChg).length;
+  n+=Object.keys(dImgChg).length;
+  n+=Object.keys(bgChg).length;
+  return n;
+}
+function refreshBadge(){
+  const n=countChg();
+  $('changes-badge').textContent=n>0?tr('n_changes',n):'';
+}
+function ensureVChg(si){if(!vChg[si])vChg[si]={};}
+
+/* ── Viewport ratio ──────────────────────── */
+function setVPH(){VP.style.height=(VP.offsetWidth*9/16)+'px';}
+let _resizeTo=null, _lastVW=window.innerWidth;
+window.addEventListener('resize',()=>{
+  // The Android soft keyboard fires `resize` when it opens — re-running
+  // renderSlide() would destroy the focused contenteditable and slam the
+  // keyboard shut. Only react when the WIDTH actually changed (true layout
+  // change, e.g. orientation flip), and skip entirely while the user is
+  // typing in a slide text shape.
+  setVPH();
+  const ae = document.activeElement;
+  const isEditingShape = ae && ae.classList && ae.classList.contains('s-text-wrap');
+  const widthChanged = Math.abs(window.innerWidth - _lastVW) > 2;
+  _lastVW = window.innerWidth;
+  if(isEditingShape || !widthChanged) return;
+  clearTimeout(_resizeTo);
+  _resizeTo = setTimeout(()=>renderSlide(curSlide), 120);
+});
+
+/* ── Render slide ────────────────────────── */
+function shapeText(dispIdx, shapeKey, shape){
+  const chg=vChg[dispIdx]?.[shapeKey];
+  if(chg?.type==='text') return chg.text;
+  if(shape.full_text) return shape.full_text;
+  return (shape.paras||[]).map(p=>p.text||'').join('\n');
+}
+
+function cellText(dispIdx, shapeKey, ri, ci, defaultText){
+  const cells=vChg[dispIdx]?.[shapeKey]?.cells;
+  return cells?.[`${ri}_${ci}`]??defaultText;
+}
+
+function isBgShape(shape){
+  return shape.type==='image' && shape.left===0 && shape.top===0
+      && shape.w>=950 && shape.h>=530;
+}
+
+function slideHasChanges(dispIdx){
+  const s=vChg[dispIdx];
+  if(s){
+    for(const k in s){
+      const c=s[k];
+      if(c.type==='table') { if(c.cells && Object.keys(c.cells).length) return true; }
+      else if(c.type==='text' || c.type==='image' || c.left!==undefined) return true;
+    }
+  }
+  const entry=displaySlides[dispIdx];
+  if(entry && entry.type==='orig' && bgChg[entry.idx]) return true;
+  return false;
+}
+
+function renderSlide(idx){
+  curSlide=idx;
+  if(!displaySlides.length) return;
+  const entry=displaySlides[idx];
+  const vw=VP.offsetWidth;
+  if(!vw){requestAnimationFrame(()=>renderSlide(idx));return;}
+  SC.innerHTML='';
+
+  const shapes=(entry.type==='orig')?(slideData.slides[entry.idx]?.shapes||[]):[];
+
+  shapes.forEach((shape,si)=>{
+    if(shape.type==='other') return;
+    const shapeKey=String(si);
+    const chg=vChg[idx]?.[shapeKey];
+    const left=chg?.left??shape.left;
+    const top =chg?.top ??shape.top;
+    const w   =chg?.w   ??shape.w;
+    const h   =chg?.h   ??shape.h;
+    const isBg=isBgShape(shape);
+    const isEdited = chg && (chg.type==='text' || chg.type==='image' ||
+                              (chg.cells && Object.keys(chg.cells).length>0));
+
+    const div=document.createElement('div');
+    div.className='s-shape';
+    div.dataset.shapeKey=shapeKey;
+    div.style.cssText=`left:${(left/960*100).toFixed(3)}%;top:${(top/540*100).toFixed(3)}%;width:${(w/960*100).toFixed(3)}%;height:${(h/540*100).toFixed(3)}%`;
+    if(isEdited) div.classList.add('is-edited');
+
+    if(shape.type==='image'){
+      div.classList.add(isBg?'is-bg':'is-image');
+      const bgSrc=isBg && entry.type==='orig' ? bgPreviewSrc[entry.idx] : null;
+      const displaySrc=(chg?.type==='image')?chg.src:(bgSrc||shape.src);
+      if(displaySrc){
+        const img=document.createElement('img');
+        img.className='s-img';
+        img.src=displaySrc;
+        img.draggable=false;
+        div.appendChild(img);
+      }
+      const bgChanged = isBg && entry.type==='orig' && !!bgChg[entry.idx];
+      // Whole shape clickable; tiny corner badge as visual hint only.
+      const badge=document.createElement('div');
+      badge.className='s-badge'+(isBg?' bg-badge':'')+((isEdited||bgChanged)?' edited-badge':'');
+      badge.textContent=(isEdited||bgChanged)?'✓':(isBg?'🌄':'🖼️');
+      div.appendChild(badge);
+      // Show briefly, then fade so the badge never permanently obscures content.
+      setTimeout(()=>badge.classList.add('faded'), 1800);
+      const k=shapeKey,di=idx;
+      div.addEventListener('click',e=>{
+        e.stopPropagation();
+        const cs=vChg[di]?.[k]?.src||shape.src;
+        openImgModal(di,k,cs,isBg);
+      });
+
+    } else if(shape.type==='text'){
+      div.classList.add('is-text');
+      // Keep contenteditable always on so the browser handles tap → focus →
+      // soft-keyboard naturally (no race with our JS adding contenteditable
+      // mid-tap, which was suppressing the keyboard on Android).
+      const wrap=document.createElement('div');
+      wrap.className='s-text-wrap';
+      // Use setAttribute (not the IDL property) — some Android WebViews
+      // refuse to focus contenteditable set via property assignment.
+      wrap.setAttribute('contenteditable','true');
+      wrap.setAttribute('inputmode','text');
+      wrap.setAttribute('autocapitalize','sentences');
+      wrap.setAttribute('spellcheck','false');
+      wrap.dataset.role='text-edit';
+      const scale=vw/960;
+      const paras=(chg?.type==='text')
+        ?[{text:chg.text,size:shape.paras[0]?.size||18,bold:shape.paras[0]?.bold||false,color:shape.paras[0]?.color||'#111',align:shape.paras[0]?.align||'left'}]
+        :(shape.paras||[]);
+      // Render each paragraph as a separate <div> so contenteditable preserves
+      // line-breaks naturally. We capture text on blur via innerText.
+      paras.forEach(p=>{
+        const pd=document.createElement('div');
+        pd.className='s-para';
+        pd.style.cssText=`font-size:${Math.max(9,Math.round((p.size||18)*scale))}px;color:${p.color||'#111'};font-weight:${p.bold?'bold':'normal'};text-align:${p.align||'left'}`;
+        pd.textContent=p.text||'';
+        wrap.appendChild(pd);
+      });
+      div.appendChild(wrap);
+      _attachShapeTextEdit(div, wrap, idx, shapeKey, shape);
+
+    } else if(shape.type==='table'){
+      div.classList.add('is-table');
+      const rows=shape.rows||[];
+      const numCols=rows[0]?.length||1;
+      const scale=vw/960;
+      const shW=w*scale, shH=h*scale;
+      const rowH=shH/Math.max(rows.length,1);
+      const colW=shW/Math.max(numCols,1);
+      // Adaptive cell font: longest text per column drives a size that lets
+      // the cell wrap onto ~2-3 lines without ellipsis, never bigger than rowH/2.
+      let longestChars=4;
+      rows.forEach(r=>r.forEach(c=>{
+        const t=(c?.text||'').trim();
+        if(t.length>longestChars) longestChars=t.length;
+      }));
+      // Heuristic: ~1.7px per char at 10px → derive a size that mostly fits in 2 lines.
+      const widthBased = Math.floor((colW*2.0) / Math.max(longestChars,4) * 1.6);
+      const heightBased = Math.floor(rowH*0.42);
+      const fs=Math.max(6, Math.min(11, widthBased, heightBased));
+
+      const headerRow=rows[0]||[];
+      const headerHasAnyFill = headerRow.some(c=>!!c?.fill);
+
+      const preview=document.createElement('div');
+      preview.className='s-tbl-preview';
+      const editedCells=vChg[idx]?.[shapeKey]?.cells||{};
+      rows.forEach((row,ri)=>{
+        const rowDiv=document.createElement('div');
+        rowDiv.className='s-tbl-preview-row';
+        if(ri===0 && headerHasAnyFill) rowDiv.dataset.rowHasFill='1';
+        row.forEach((cell,ci)=>{
+          const cellDiv=document.createElement('div');
+          cellDiv.className='s-tbl-preview-cell';
+          if(editedCells[ri+'_'+ci]!==undefined) cellDiv.classList.add('cell-changed');
+          // Most PPTX tables center their content; only honor explicit non-center alignment.
+          const align=cell.align && cell.align!=='left' ? cell.align : (cell.align==='left'?'left':'center');
+          cellDiv.style.justifyContent=(align==='center'?'center':align==='right'?'flex-end':'flex-start');
+          if(cell.fill){ cellDiv.style.background=cell.fill; cellDiv.dataset.fill='1'; }
+          const span=document.createElement('span');
+          span.style.fontSize=fs+'px';
+          span.style.fontWeight=(ri===0||cell.bold)?'bold':'normal';
+          span.style.textAlign=align;
+          // Allow up to 3 lines per cell so longer strings wrap instead of clip.
+          const maxLines=Math.max(1, Math.min(3, Math.floor(rowH/(fs*1.15))));
+          span.style.webkitLineClamp=String(maxLines);
+          if(cell.color && cell.color!=='#111111' && cell.color!=='#111') span.style.color=cell.color;
+          span.textContent=cellText(idx,shapeKey,ri,ci,cell.text);
+          cellDiv.appendChild(span);
+          rowDiv.appendChild(cellDiv);
+        });
+        preview.appendChild(rowDiv);
+      });
+      div.appendChild(preview);
+
+      const badge=document.createElement('div');
+      // Compact icon-only badge in the corner, so the last column stays visible.
+      badge.className='s-badge'+(isEdited?' edited-badge':'');
+      badge.textContent=isEdited?'✓':'📊';
+      badge.title=rows.length+'×'+numCols;
+      div.appendChild(badge);
+      setTimeout(()=>badge.classList.add('faded'), 1800);
+
+      const k=shapeKey,di=idx,sh=shape;
+      div.addEventListener('click',e=>{e.stopPropagation();openTableModal(di,k,sh);});
+    }
+
+    // Drag-to-move for images and tables only. Text shapes are edited inline,
+    // so attaching a touch-drag handler steals the touch sequence the OS needs
+    // to raise the soft keyboard — leaving the user unable to type.
+    if(!isBg && shape.type!=='text'){
+      addDragToShape(div, idx, shapeKey, left, top, w, h);
+    }
+    SC.appendChild(div);
+  });
+
+  $('prev-btn').disabled=idx===0;
+  $('next-btn').disabled=idx===displaySlides.length-1;
+  $('slide-counter').textContent=tr('slide_of',idx+1,displaySlides.length);
+  $('btn-slide-left').disabled=idx===0;
+  $('btn-slide-right').disabled=idx===displaySlides.length-1;
+  // Update active thumb
+  document.querySelectorAll('.thumb').forEach((t,i)=>t.classList.toggle('active',i===idx));
+  // Scroll the active thumb into view (without scrolling the whole page).
+  const at=document.querySelector('.thumb.active');
+  if(at) at.scrollIntoView({block:'nearest',inline:'center',behavior:'smooth'});
+  // Show/hide hint
+  const hint=$('edit-hint'); if(hint){ hint.textContent=tr('hint_edit'); hint.classList.remove('hide'); clearTimeout(_hintTo); _hintTo=setTimeout(()=>hint.classList.add('hide'),2400); }
+}
+let _hintTo=null;
+
+/* ── Inline text shape editing (PPTX) ────── */
+function _attachShapeTextEdit(div, wrap, dispIdx, shapeKey, shape){
+  let _origText = (shape.paras||[]).map(p=>p.text||'').join('\n');
+  let _saved = false;
+  // The wrap is contenteditable from the start (set in renderSlide), so the
+  // browser does the tap→focus→soft-keyboard handshake natively. We only
+  // listen for focus/blur to manage editing chrome and commit changes.
+  wrap.addEventListener('focus', ()=>{
+    div.classList.add('is-editing');
+    _saved=false;
+  });
+  wrap.addEventListener('blur', ()=>{
+    div.classList.remove('is-editing');
+    if(_saved) return; // already committed via apply
+    const newText = wrap.innerText.replace(/\u00a0/g,' ').replace(/\r\n/g,'\n').trimEnd();
+    if(newText !== _origText){
+      ensureVChg(dispIdx);
+      if(!vChg[dispIdx][shapeKey]) vChg[dispIdx][shapeKey]={};
+      vChg[dispIdx][shapeKey].type='text';
+      vChg[dispIdx][shapeKey].text=newText;
+      div.classList.add('is-edited');
+      updateThumb(dispIdx);
+    } else {
+      // Reverted to original — strip the text marker. If position changes are
+      // also stored on this shapeKey, keep them but reclassify as a pos-only
+      // change so the rebuild path doesn't try to overwrite the text.
+      if(vChg[dispIdx]?.[shapeKey]?.type==='text'){
+        delete vChg[dispIdx][shapeKey].text;
+        delete vChg[dispIdx][shapeKey].type;
+        // Clean up if nothing remains; else flag as plain position change.
+        const remaining = Object.keys(vChg[dispIdx][shapeKey]);
+        if(remaining.length === 0){
+          delete vChg[dispIdx][shapeKey];
+          if(Object.keys(vChg[dispIdx]).length === 0) delete vChg[dispIdx];
+        } else {
+          vChg[dispIdx][shapeKey].type = 'pos';
+        }
+      }
+      div.classList.remove('is-edited');
+    }
+    refreshBadge();
+  });
+  wrap.addEventListener('keydown', e=>{
+    if(e.key==='Escape'){
+      e.preventDefault();
+      _saved=true;
+      wrap.innerHTML='';
+      (shape.paras||[]).forEach(p=>{
+        const pd=document.createElement('div');
+        pd.className='s-para';
+        pd.style.cssText=`font-size:${(p.size||18)}px;color:${p.color||'#111'};font-weight:${p.bold?'bold':'normal'};text-align:${p.align||'left'}`;
+        pd.textContent=(vChg[dispIdx]?.[shapeKey]?.type==='text'?vChg[dispIdx][shapeKey].text:(p.text||''));
+        wrap.appendChild(pd);
+      });
+      wrap.blur();
+      div.classList.remove('is-editing');
+    }
+  });
+}
+
+/* ── Thumbnail strip ─────────────────────── */
+function buildThumbs(){
+  const el=$('thumb-strip'); el.innerHTML='';
+  displaySlides.forEach((entry,i)=>{
+    const t=document.createElement('div');
+    t.className='thumb'+(i===curSlide?' active':'');
+    t.dataset.idx=i;
+    const num=document.createElement('div');
+    num.className='thumb-num'; num.textContent=(i+1);
+    t.appendChild(num);
+    const cv=document.createElement('canvas');
+    cv.width=148; cv.height=84;
+    t.appendChild(cv);
+    if(slideHasChanges(i)){
+      const dot=document.createElement('div'); dot.className='thumb-edited'; t.appendChild(dot);
+    }
+    _attachThumbInteractions(t, i);
+    el.appendChild(t);
+    paintThumb(cv, entry);
+  });
+}
+
+/* Long-press to drag-reorder thumbs.
+   - Tap (no movement, short) → switch slide.
+   - Hold ~380ms → enter drag mode (haptic), then horizontally drag to reorder.
+*/
+let _dragTimer=null, _dragging=false, _dragFromIdx=-1, _dragGhost=null,
+    _dragLastX=0, _dragLastIdx=-1;
+function _attachThumbInteractions(thumb, idx){
+  let downX=0, downY=0, longPress=false, moved=false;
+
+  const cancelLP=()=>{ if(_dragTimer){clearTimeout(_dragTimer);_dragTimer=null;} };
+
+  const startLP=(x,y)=>{
+    cancelLP();
+    longPress=false; moved=false; downX=x; downY=y;
+    _dragTimer=setTimeout(()=>{
+      longPress=true;
+      try{ tg?.HapticFeedback?.impactOccurred?.('medium'); }catch(_){}
+      _beginDrag(thumb, idx, x, y);
+    },380);
+  };
+
+  thumb.addEventListener('pointerdown',e=>{
+    if(e.button!==undefined && e.button!==0) return;
+    try{ thumb.setPointerCapture(e.pointerId); }catch(_){}
+    thumb._pid=e.pointerId;
+    startLP(e.clientX, e.clientY);
+  });
+  thumb.addEventListener('pointermove',e=>{
+    const dx=Math.abs(e.clientX-downX), dy=Math.abs(e.clientY-downY);
+    if(dx>6||dy>6){ moved=true; if(!_dragging) cancelLP(); }
+    if(_dragging){ e.preventDefault(); _onDragMove(e.clientX, e.clientY); }
+  });
+  const up=e=>{
+    cancelLP();
+    try{ if(thumb._pid!=null) thumb.releasePointerCapture(thumb._pid); }catch(_){}
+    thumb._pid=null;
+    if(_dragging){ _endDrag(); return; }
+    if(!moved) renderSlide(idx);
+  };
+  thumb.addEventListener('pointerup',up);
+  thumb.addEventListener('pointercancel',()=>{ cancelLP(); try{ if(thumb._pid!=null) thumb.releasePointerCapture(thumb._pid); }catch(_){} thumb._pid=null; if(_dragging) _endDrag(); });
+  thumb.addEventListener('contextmenu',e=>e.preventDefault());
+}
+
+/* Global touchmove blocker installed only while a drag is active.
+   Prevents native horizontal scroll of the strip and any residual
+   page / Telegram-WebApp scroll from competing with the drag gesture. */
+function _dragTouchBlocker(e){ try{ e.preventDefault(); }catch(_){} }
+
+function _beginDrag(thumb, idx, x, y){
+  _dragging=true; _dragFromIdx=idx; _dragLastIdx=idx; _dragLastX=x;
+  thumb.classList.add('dragging');
+  thumb.style.opacity='0.35';
+  // Build a floating ghost.
+  const r=thumb.getBoundingClientRect();
+  const g=thumb.cloneNode(true);
+  g.style.position='fixed'; g.style.left=r.left+'px'; g.style.top=r.top+'px';
+  g.style.width=r.width+'px'; g.style.height=r.height+'px';
+  g.style.pointerEvents='none'; g.style.zIndex='400';
+  g.style.transform='scale(1.08) translate(-50%,-12px)';
+  g.style.transformOrigin='left top';
+  g.style.boxShadow='0 8px 20px rgba(0,0,0,.55)';
+  g.style.borderColor='var(--btn)';
+  g.style.opacity='0.95';
+  document.body.appendChild(g);
+  _dragGhost=g;
+  // Lock the rest of the UI: stop strip/page scroll, block other taps.
+  document.body.classList.add('drag-lock');
+  document.addEventListener('touchmove', _dragTouchBlocker, {passive:false});
+}
+/* Edge auto-scroll: while the finger is held within EDGE_ZONE px of the
+   strip's left/right side, the strip auto-scrolls horizontally on a
+   requestAnimationFrame loop. Speed grows with how deep the finger is
+   in the edge zone (capped at MAX_STEP px/frame) so the user can pace
+   the scroll. After each scroll tick we re-evaluate the drop target so
+   newly revealed thumbs become valid drop positions live. */
+const EDGE_ZONE=44, MAX_STEP=22;
+let _autoScrollRAF=null, _autoScrollDir=0, _lastPtrX=0, _lastPtrY=0;
+
+function _evalDropTarget(x, y){
+  const strip=$('thumb-strip');
+  const items=Array.from(strip.querySelectorAll('.thumb'));
+  for(let i=0;i<items.length;i++){
+    const r=items[i].getBoundingClientRect();
+    if(x>=r.left-3 && x<=r.right+3 && y>=r.top-30 && y<=r.bottom+30){
+      if(i!==_dragLastIdx && i!==_dragFromIdx){
+        _moveSlideTo(_dragFromIdx, i);
+        _dragFromIdx=i; _dragLastIdx=i;
+      }
+      return;
+    }
+  }
+}
+function _autoScrollTick(){
+  if(!_dragging || _autoScrollDir===0){ _autoScrollRAF=null; return; }
+  const strip=$('thumb-strip');
+  const sr=strip.getBoundingClientRect();
+  // Compute speed proportional to depth inside the edge zone.
+  let depth=0;
+  if(_autoScrollDir<0)      depth=Math.max(0, (sr.left + EDGE_ZONE) - _lastPtrX);
+  else if(_autoScrollDir>0) depth=Math.max(0, _lastPtrX - (sr.right - EDGE_ZONE));
+  const step=Math.min(MAX_STEP, 4 + (depth/EDGE_ZONE)*MAX_STEP);
+  const before=strip.scrollLeft;
+  strip.scrollLeft = before + _autoScrollDir*step;
+  // If we hit the wall, stop.
+  if(strip.scrollLeft===before){ _autoScrollRAF=null; _autoScrollDir=0; return; }
+  // Re-evaluate drop target as new thumbs scroll under the finger.
+  _evalDropTarget(_lastPtrX, _lastPtrY);
+  _autoScrollRAF=requestAnimationFrame(_autoScrollTick);
+}
+function _setAutoScrollDir(dir){
+  if(dir===_autoScrollDir) return;
+  _autoScrollDir=dir;
+  if(dir!==0 && _autoScrollRAF==null){
+    _autoScrollRAF=requestAnimationFrame(_autoScrollTick);
+  }
+}
+function _stopAutoScroll(){
+  if(_autoScrollRAF!=null){ cancelAnimationFrame(_autoScrollRAF); _autoScrollRAF=null; }
+  _autoScrollDir=0;
+}
+
+function _onDragMove(x, y){
+  if(!_dragGhost) return;
+  _dragGhost.style.left=x+'px'; _dragGhost.style.top=y+'px';
+  _lastPtrX=x; _lastPtrY=y;
+  // Edge-zone check runs unconditionally so auto-scroll works even
+  // when a thumb sits under the finger near the edge.
+  const strip=$('thumb-strip');
+  const sr=strip.getBoundingClientRect();
+  if(x < sr.left + EDGE_ZONE)       _setAutoScrollDir(-1);
+  else if(x > sr.right - EDGE_ZONE) _setAutoScrollDir(1);
+  else                              _setAutoScrollDir(0);
+  // Live re-order against whatever thumb is currently under the finger.
+  _evalDropTarget(x, y);
+  _dragLastX=x;
+}
+function _endDrag(){
+  if(_dragGhost){ try{ _dragGhost.remove(); }catch(_){} }
+  _dragGhost=null; _dragging=false;
+  _stopAutoScroll();
+  // Release the global drag-lock.
+  document.body.classList.remove('drag-lock');
+  try{ document.removeEventListener('touchmove', _dragTouchBlocker, {passive:false}); }catch(_){}
+  document.querySelectorAll('.thumb').forEach(t=>{t.style.opacity='';t.classList.remove('dragging');});
+  buildThumbs();
+  renderSlide(curSlide);
+  refreshBadge();
+}
+function _moveSlideTo(from, to){
+  if(from===to||from<0||to<0||from>=displaySlides.length||to>=displaySlides.length) return;
+  const [moved]=displaySlides.splice(from,1);
+  displaySlides.splice(to,0,moved);
+  // Remap vChg keys (which are indexed by display index).
+  const remap={};
+  Object.keys(vChg).forEach(k=>{
+    let kn=parseInt(k,10);
+    if(kn===from) kn=to;
+    else if(from<to && kn>from && kn<=to) kn--;
+    else if(from>to && kn>=to && kn<from) kn++;
+    remap[kn]=vChg[k];
+  });
+  for(const k in vChg) delete vChg[k];
+  Object.assign(vChg, remap);
+  if(curSlide===from) curSlide=to;
+  else if(from<to && curSlide>from && curSlide<=to) curSlide--;
+  else if(from>to && curSlide>=to && curSlide<from) curSlide++;
+  // Repaint immediately for live feedback during drag.
+  const el=$('thumb-strip');
+  const items=Array.from(el.children);
+  if(items.length===displaySlides.length){
+    const node=items[from];
+    if(to>=items.length-1) el.appendChild(node);
+    else el.insertBefore(node, items[to + (to>from?1:0)]);
+    items.forEach((n,i)=>{ const num=n.querySelector('.thumb-num'); if(num) num.textContent=(i+1); });
+  }
+}
+
+/* Cache loaded thumbnail images by src so we don't re-download on each repaint. */
+const _thumbImgCache=new Map();
+function _loadThumbImg(src, onReady){
+  if(!src) return null;
+  let entry=_thumbImgCache.get(src);
+  if(entry){
+    if(entry.failed) return null;
+    if(entry.img && entry.img.complete && entry.img.naturalWidth>0) return entry.img;
+    if(onReady) entry.cbs.push(onReady);
+    return null;
+  }
+  const img=new Image();
+  entry={img, cbs:onReady?[onReady]:[]};
+  _thumbImgCache.set(src, entry);
+  img.onload=()=>{ const cbs=entry.cbs.splice(0); cbs.forEach(cb=>{ try{cb();}catch(_){}}); };
+  img.onerror=()=>{ const cbs=entry.cbs.splice(0); _thumbImgCache.set(src,{img:null,cbs:[],failed:true}); cbs.forEach(cb=>{try{cb();}catch(_){}}); };
+  img.src=src;
+  return null;
+}
+
+function paintThumb(cv, entry){
+  const ctx=cv.getContext('2d');
+  // Slide page background (white like a real slide).
+  ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,cv.width,cv.height);
+  if(entry.type!=='orig') return;
+  const slide=slideData.slides[entry.idx]; if(!slide) return;
+  const shapes=slide.shapes||[];
+  const sx=cv.width/960, sy=cv.height/540;
+  const dispIdx=displaySlides.indexOf(entry);
+  const bg=shapes.find(s=>s.type==='image' && isBgShape(s));
+  const customBg=bgPreviewSrc[entry.idx];
+  let bgSrc=null;
+  if(customBg) bgSrc=customBg;
+  else if(bg){
+    const chg=vChg[dispIdx]?.[String(shapes.indexOf(bg))];
+    bgSrc=(chg?.type==='image')?chg.src:bg.src;
+  }
+  const repaint=()=>{ try{ paintThumb(cv, entry); }catch(_){} };
+  if(bgSrc){
+    const img=_loadThumbImg(bgSrc, repaint);
+    if(img){ try{ ctx.drawImage(img,0,0,cv.width,cv.height); }catch(_){} }
+  }
+  paintThumbShapes(ctx,shapes,sx,sy,bg,dispIdx,repaint);
+}
+
+function paintThumbShapes(ctx,shapes,sx,sy,bg,dispIdx,repaint){
+  shapes.forEach((s,si)=>{
+    if(s===bg||s.type==='other') return;
+    const x=s.left*sx, y=s.top*sy, w=s.w*sx, h=s.h*sy;
+    if(w<=0||h<=0) return;
+    const chg=vChg[dispIdx]?.[String(si)];
+
+    if(s.type==='image'){
+      const src=(chg?.type==='image')?chg.src:s.src;
+      const img=src?_loadThumbImg(src, repaint):null;
+      if(img){
+        try{ ctx.drawImage(img,x,y,w,h); }catch(_){}
+      } else {
+        // Fallback glyph: small picture icon on a soft tile.
+        ctx.fillStyle='rgba(180,200,225,.55)'; ctx.fillRect(x,y,w,h);
+        ctx.fillStyle='rgba(80,100,140,.85)';
+        const ic=Math.min(w,h)*0.45;
+        ctx.font='bold '+ic.toFixed(1)+'px -apple-system,Segoe UI,sans-serif';
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText('🖼', x+w/2, y+h/2);
+      }
+    } else if(s.type==='text'){
+      // Draw real (scaled) text directly on the slide background — no white box.
+      const paras=(chg?.type==='text')
+        ?[{text:chg.text,size:s.paras?.[0]?.size||18,bold:s.paras?.[0]?.bold,color:s.paras?.[0]?.color,align:s.paras?.[0]?.align}]
+        :(s.paras||[]);
+      let cy=y+2;
+      const maxLines=Math.max(1, Math.floor(h/Math.max(6, (paras[0]?.size||18)*sy*1.15)));
+      for(let i=0;i<Math.min(paras.length,maxLines);i++){
+        const p=paras[i]; if(!p) break;
+        const fs=Math.max(6, Math.round((p.size||18)*sy));
+        const txt=(p.text||'').split('\n')[0].trim();
+        if(!txt){ cy+=fs*1.2; continue; }
+        ctx.font=(p.bold?'bold ':'')+fs+'px -apple-system,Segoe UI,Roboto,sans-serif';
+        ctx.fillStyle=p.color||'#111';
+        ctx.textBaseline='top';
+        ctx.textAlign=(p.align==='center')?'center':(p.align==='right'?'right':'left');
+        const tx=ctx.textAlign==='center'?x+w/2:(ctx.textAlign==='right'?x+w-1:x+1);
+        // Truncate to width with ellipsis
+        let s2=txt;
+        if(ctx.measureText(s2).width>w-2){
+          while(s2.length>1 && ctx.measureText(s2+'…').width>w-2) s2=s2.slice(0,-1);
+          s2+='…';
+        }
+        ctx.fillText(s2, tx, cy);
+        cy+=fs*1.2;
+        if(cy>y+h-2) break;
+      }
+      ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+    } else if(s.type==='table'){
+      const rs=s.rows||[]; if(!rs.length) return;
+      const nc=rs[0]?.length||1;
+      const rh=h/rs.length, cw=w/nc;
+      const headerHasAnyFill = (rs[0]||[]).some(c=>!!c?.fill);
+      // Per-cell fills: use PPTX-extracted fill if present; otherwise leave
+      // transparent (slide bg shows through). Only fall back to a soft blue
+      // header tint when the entire header row had NO fills in the source.
+      for(let r=0;r<rs.length;r++){
+        for(let c=0;c<nc;c++){
+          const cf=(rs[r][c]||{}).fill;
+          if(cf){ ctx.fillStyle=cf; ctx.fillRect(x+c*cw, y+r*rh, cw, rh); }
+          else if(r===0 && !headerHasAnyFill){ ctx.fillStyle='rgba(59,130,246,.16)'; ctx.fillRect(x+c*cw, y+r*rh, cw, rh); }
+        }
+      }
+      ctx.strokeStyle='rgba(0,0,0,.55)'; ctx.lineWidth=0.6;
+      for(let i=0;i<=rs.length;i++){ ctx.beginPath(); ctx.moveTo(x,y+i*rh); ctx.lineTo(x+w,y+i*rh); ctx.stroke(); }
+      for(let i=0;i<=nc;i++){ ctx.beginPath(); ctx.moveTo(x+i*cw,y); ctx.lineTo(x+i*cw,y+h); ctx.stroke(); }
+      // Cell text — wrap onto up to 2 lines so words aren't truncated mid-sound.
+      const editedCells=vChg[dispIdx]?.[String(si)]?.cells||{};
+      let longestChars=4;
+      rs.forEach(r=>r.forEach(c=>{
+        const t=(c?.text||'').trim(); if(t.length>longestChars) longestChars=t.length;
+      }));
+      const widthBased = (cw*2.0)/Math.max(longestChars,4) * 1.6;
+      const fs=Math.max(4.5, Math.min(rh*0.42, widthBased, 11));
+      ctx.textBaseline='middle';
+      for(let r=0;r<rs.length;r++){
+        for(let c=0;c<nc;c++){
+          const cell=rs[r][c]||{};
+          const key=r+'_'+c;
+          const txtRaw=(editedCells[key]!==undefined?editedCells[key]:cell.text)||'';
+          if(!txtRaw) continue;
+          const head=r===0;
+          ctx.font=(head||cell.bold?'bold ':'')+fs+'px -apple-system,Segoe UI,sans-serif';
+          ctx.fillStyle=cell.color&&cell.color!=='#111111'&&cell.color!=='#111'?cell.color:'#111';
+          // Default to centered (matches DOM render and real PPTX tables).
+          const align=cell.align && cell.align!=='left' ? cell.align : (cell.align==='left'?'left':'center');
+          ctx.textAlign=(align==='center')?'center':(align==='right'?'right':'left');
+          // Word-wrap into up to 2 lines.
+          const words=txtRaw.replace(/\n/g,' ').split(/\s+/).filter(Boolean);
+          const maxW=cw-3;
+          const lines=[];
+          let cur='';
+          for(const wd of words){
+            const test=cur?cur+' '+wd:wd;
+            if(ctx.measureText(test).width<=maxW){ cur=test; }
+            else { if(cur) lines.push(cur); cur=wd; if(lines.length>=1) break; }
+          }
+          if(cur) lines.push(cur);
+          const maxLines=Math.max(1, Math.min(2, Math.floor(rh/(fs*1.15))));
+          const drawLines=lines.slice(0,maxLines);
+          // If overflow, shrink last line with ellipsis.
+          if(lines.length>maxLines && drawLines.length){
+            let last=drawLines[drawLines.length-1];
+            while(last.length>1 && ctx.measureText(last+'…').width>maxW) last=last.slice(0,-1);
+            drawLines[drawLines.length-1]=last+'…';
+          } else if(drawLines.length===1 && ctx.measureText(drawLines[0]).width>maxW){
+            let t=drawLines[0];
+            while(t.length>1 && ctx.measureText(t+'…').width>maxW) t=t.slice(0,-1);
+            drawLines[0]=t+'…';
+          }
+          const cx=ctx.textAlign==='center'?x+c*cw+cw/2
+                  :ctx.textAlign==='right'?x+(c+1)*cw-2
+                  :x+c*cw+2;
+          const totalH=drawLines.length*fs*1.15;
+          let cy=y+r*rh+(rh-totalH)/2+fs*0.6;
+          for(const ln of drawLines){
+            ctx.fillText(ln, cx, cy);
+            cy+=fs*1.15;
+          }
+        }
+      }
+      ctx.textBaseline='alphabetic'; ctx.textAlign='left';
+    }
+  });
+}
+
+function updateThumb(dispIdx){
+  const t=document.querySelectorAll('.thumb')[dispIdx]; if(!t) return;
+  const cv=t.querySelector('canvas'); if(cv) paintThumb(cv, displaySlides[dispIdx]);
+  // ensure edited dot
+  let dot=t.querySelector('.thumb-edited');
+  if(slideHasChanges(dispIdx)){
+    if(!dot){ dot=document.createElement('div'); dot.className='thumb-edited'; t.appendChild(dot); }
+  } else if(dot){ dot.remove(); }
+}
+
+/* ── Nav ─────────────────────────────────── */
+$('prev-btn').addEventListener('click',()=>{if(curSlide>0)renderSlide(curSlide-1);});
+$('next-btn').addEventListener('click',()=>{if(curSlide<displaySlides.length-1)renderSlide(curSlide+1);});
+
+/* ── Drag-to-move shapes ─────────────────── */
+function addDragToShape(div, dispIdx, shapeKey, initLeft, initTop, initW, initH){
+  let sx=0,sy=0,cl=initLeft,ct=initTop,dragging=false,dragged=false;
+
+  div.addEventListener('touchstart',e=>{
+    const t=e.touches[0];
+    sx=t.clientX; sy=t.clientY;
+    cl=vChg[dispIdx]?.[shapeKey]?.left??initLeft;
+    ct=vChg[dispIdx]?.[shapeKey]?.top??initTop;
+    dragging=false; dragged=false;
+  },{passive:true});
+
+  div.addEventListener('touchmove',e=>{
+    const t=e.touches[0];
+    const dx=t.clientX-sx, dy=t.clientY-sy;
+    if(!dragging&&Math.sqrt(dx*dx+dy*dy)<8) return;
+    dragging=true; dragged=true;
+    e.preventDefault();
+    div.classList.add('is-dragging');
+    const vpW=VP.offsetWidth, vpH=vpW*9/16;
+    const nl=Math.max(0,Math.min(960-initW, cl+dx/vpW*960));
+    const nt=Math.max(0,Math.min(540-initH, ct+dy/vpH*540));
+    div.style.left=(nl/960*100).toFixed(3)+'%';
+    div.style.top=(nt/540*100).toFixed(3)+'%';
+    ensureVChg(dispIdx);
+    if(!vChg[dispIdx][shapeKey]) vChg[dispIdx][shapeKey]={};
+    vChg[dispIdx][shapeKey].left=nl;
+    vChg[dispIdx][shapeKey].top=nt;
+  },{passive:false});
+
+  div.addEventListener('touchend',e=>{
+    div.classList.remove('is-dragging');
+    if(dragged){
+      _tx=null; // prevent slide swipe
+      div.classList.add('is-edited');
+      refreshBadge();
+      updateThumb(dispIdx);
+      // block next click so edit modal doesn't open
+      div.addEventListener('click',ev=>ev.stopPropagation(),{once:true,capture:true});
+    }
+    dragging=false;
+  },{passive:true});
+}
+
+/* ── Swipe ───────────────────────────────── */
+let _tx=null;
+VP.addEventListener('touchstart',e=>{_tx=e.touches[0].clientX;},{passive:true});
+VP.addEventListener('touchend',e=>{
+  if(_tx===null)return;
+  const dx=e.changedTouches[0].clientX-_tx;
+  _tx=null;
+  if(Math.abs(dx)>45){
+    if(dx<0&&curSlide<displaySlides.length-1)renderSlide(curSlide+1);
+    if(dx>0&&curSlide>0)renderSlide(curSlide-1);
+  }
+},{passive:true});
+
+/* ── Templates Library ───────────────────── */
+let _tplCache=null;
+function openTemplatesModal(){
+  $('btn-templates').textContent=tr('tpl_btn');
+  $('tpl-title').textContent=tr('tpl_title');
+  $('tpl-scope-current').textContent=tr('tpl_scope_one');
+  $('tpl-scope-all').textContent=tr('tpl_scope_all');
+  _tplScope='current';
+  $('tpl-scope-current').classList.add('active');
+  $('tpl-scope-all').classList.remove('active');
+  show($('tpl-modal'));
+  loadTemplatesGrid();
+}
+async function loadTemplatesGrid(){
+  const grid=$('tpl-grid');
+  if(_tplCache){ renderTemplatesGrid(_tplCache); return; }
+  grid.innerHTML='<div class="tpl-loading">'+tr('tpl_loading')+'</div>';
+  try{
+    const r=await fetch('/api/templates',{headers:_authHeaders()});
+    const d=await r.json();
+    _tplCache=d.templates||[];
+    renderTemplatesGrid(_tplCache);
+  }catch(e){
+    grid.innerHTML='<div class="tpl-loading">⚠️</div>';
+  }
+}
+function renderTemplatesGrid(list){
+  const grid=$('tpl-grid');
+  grid.innerHTML='';
+  // Gallery card first
+  const gal=document.createElement('div');
+  gal.className='tpl-card gallery';
+  gal.innerHTML='<div class="tpl-icon">📷</div><div class="tpl-label">'+tr('tpl_gallery')+'</div>';
+  gal.addEventListener('click',()=>$('tpl-file-input').click());
+  grid.appendChild(gal);
+  list.forEach(t=>{
+    const card=document.createElement('div');
+    card.className='tpl-card';
+    const img=document.createElement('img');
+    img.src=t.url; img.alt=''; img.loading='lazy';
+    card.appendChild(img);
+    const nm=document.createElement('div');
+    nm.className='tpl-card-name';
+    nm.textContent=(t.name && (t.name[L]||t.name.uz))||t.id;
+    card.appendChild(nm);
+    card.addEventListener('click',()=>applyTemplate({template_id:t.id}, t.url));
+    grid.appendChild(card);
+  });
+}
+function _targetSlideIndices(){
+  if(_tplScope==='all'){
+    const all=[];
+    displaySlides.forEach(e=>{ if(e.type==='orig') all.push(e.idx); });
+    return all;
+  }
+  const e=displaySlides[curSlide];
+  return (e && e.type==='orig')?[e.idx]:[];
+}
+function applyTemplate(payload, previewUrl){
+  const targets=_targetSlideIndices();
+  if(!targets.length){ hide($('tpl-modal')); return; }
+  targets.forEach(origIdx=>{
+    bgChg[origIdx]=payload;
+    bgPreviewSrc[origIdx]=previewUrl;
+  });
+  hide($('tpl-modal'));
+  buildThumbs();
+  renderSlide(curSlide);
+  refreshBadge();
+}
+$('btn-templates').addEventListener('click',openTemplatesModal);
+$('tpl-close').addEventListener('click',()=>hide($('tpl-modal')));
+$('tpl-modal').addEventListener('click',e=>{ if(e.target===$('tpl-modal')) hide($('tpl-modal')); });
+$('tpl-scope-current').addEventListener('click',()=>{
+  _tplScope='current';
+  $('tpl-scope-current').classList.add('active');
+  $('tpl-scope-all').classList.remove('active');
+});
+$('tpl-scope-all').addEventListener('click',()=>{
+  _tplScope='all';
+  $('tpl-scope-all').classList.add('active');
+  $('tpl-scope-current').classList.remove('active');
+});
+$('tpl-file-input').addEventListener('change',e=>{
+  const f=e.target.files[0]; e.target.value=''; if(!f) return;
+  if(f.size > 10 * 1024 * 1024){
+    showErr(L==='ru'?'Изображение слишком большое (макс 10 МБ)':L==='en'?'Image too large (max 10 MB)':'Rasm juda katta (maks 10 MB)');
+    setTimeout(()=>hide($('error-screen')),2500);
+    return;
+  }
+  const rd=new FileReader();
+  rd.onload=ev=>{
+    compressImage(ev.target.result,1280,0.82,src=>{
+      applyTemplate({src:src}, src);
+    });
+  };
+  rd.readAsDataURL(f);
+});
+
+/* ── Slide reorder ───────────────────────── */
+$('btn-slide-left').addEventListener('click',()=>{
+  if(curSlide===0)return;
+  [displaySlides[curSlide],displaySlides[curSlide-1]]=[displaySlides[curSlide-1],displaySlides[curSlide]];
+  const t=vChg[curSlide];vChg[curSlide]=vChg[curSlide-1];vChg[curSlide-1]=t;
+  buildThumbs();renderSlide(curSlide-1);refreshBadge();
+});
+$('btn-slide-right').addEventListener('click',()=>{
+  if(curSlide>=displaySlides.length-1)return;
+  [displaySlides[curSlide],displaySlides[curSlide+1]]=[displaySlides[curSlide+1],displaySlides[curSlide]];
+  const t=vChg[curSlide];vChg[curSlide]=vChg[curSlide+1];vChg[curSlide+1]=t;
+  buildThumbs();renderSlide(curSlide+1);refreshBadge();
+});
+
+/* ── Table modal ─────────────────────────── */
+function openTableModal(dispIdx, shapeKey, shape){
+  _tblDispIdx=dispIdx;
+  _tblShapeKey=shapeKey;
+  _tblShape=shape;
+  const rows=shape.rows||[];
+  $('tbl-title').textContent=tr('tbl_title')+' ('+rows.length+'×'+(rows[0]?.length||0)+')';
+  $('tbl-hint').textContent=tr('tbl_hint');
+  $('tbl-done-btn').textContent=tr('tbl_done');
+  renderTableModal(rows);
+  show($('tbl-modal'));
+}
+
+function renderTableModal(rows){
+  const tbl=$('tbl-table');
+  tbl.innerHTML='';
+  const cells=vChg[_tblDispIdx]?.[_tblShapeKey]?.cells||{};
+  rows.forEach((row,ri)=>{
+    const tr_el=document.createElement('tr');
+    row.forEach((cell,ci)=>{
+      const td=document.createElement('td');
+      const key=`${ri}_${ci}`;
+      const txt=cells[key]??cell.text;
+      td.textContent=txt;
+      td.style.fontWeight=(ri===0||cell.bold)?'bold':'normal';
+      if(cells[key]!==undefined) td.classList.add('changed');
+      const icon=document.createElement('span');
+      icon.className='tbl-edit-icon';
+      icon.textContent='✏️';
+      td.appendChild(icon);
+      td.addEventListener('click',()=>openTableCellEdit(ri,ci,cell,txt));
+      tr_el.appendChild(td);
+    });
+    tbl.appendChild(tr_el);
+  });
+}
+
+function openTableCellEdit(ri, ci, cell, currentText){
+  _tblCellRow=ri;
+  _tblCellCol=ci;
+  _mode='edit-table';
+  $('t-title').textContent=tr('text_edit');
+  $('modal-textarea').value=currentText;
+  show($('text-modal'));
+  setTimeout(()=>$('modal-textarea').focus(),150);
+}
+
+$('tbl-close').addEventListener('click',()=>{
+  hide($('tbl-modal'));
+  renderSlide(curSlide);
+  updateThumb(curSlide);
+  refreshBadge();
+});
+$('tbl-done-btn').addEventListener('click',()=>{
+  hide($('tbl-modal'));
+  renderSlide(curSlide);
+  updateThumb(curSlide);
+  refreshBadge();
+});
+
+/* ── Text modal (now only for table-cell editing) ── */
+$('t-cancel').addEventListener('click',()=>hide($('text-modal')));
+$('text-modal').addEventListener('click',e=>{if(e.target===$('text-modal'))hide($('text-modal'));});
+
+$('t-apply').addEventListener('click',()=>{
+  const val=$('modal-textarea').value;
+  if(_mode==='edit-table'){
+    const key=`${_tblCellRow}_${_tblCellCol}`;
+    ensureVChg(_tblDispIdx);
+    if(!vChg[_tblDispIdx][_tblShapeKey]) vChg[_tblDispIdx][_tblShapeKey]={type:'table',cells:{}};
+    if(!vChg[_tblDispIdx][_tblShapeKey].cells) vChg[_tblDispIdx][_tblShapeKey].cells={};
+    vChg[_tblDispIdx][_tblShapeKey].type='table';
+    vChg[_tblDispIdx][_tblShapeKey].cells[key]=val;
+    hide($('text-modal'));
+    renderTableModal(_tblShape.rows||[]);
+  }
+});
+
+/* ── Image modal ─────────────────────────── */
+function openImgModal(dispIdx, shapeKey, currentSrc, isBg){
+  _imgMode='pptx';
+  _imgDispIdx=dispIdx;
+  _imgShapeKey=shapeKey;
+  $('img-preview-el').src=currentSrc||'';
+  if(isBg===undefined){
+    const shape = slideData?.slides?.[displaySlides[dispIdx]?.idx]?.shapes?.[parseInt(shapeKey,10)];
+    isBg = shape && isBgShape(shape);
+  }
+  $('i-title').textContent = isBg ? tr('bg_title') : tr('img_title');
+  $('img-choose-btn').textContent=tr('choose_img');
+  $('img-cancel-btn').textContent=tr('cancel');
+  show($('img-modal'));
+}
+
+function openDocImgModal(imgIdx, currentSrc, imgEl){
+  _imgMode='docx';
+  _imgDocIdx=imgIdx;
+  _imgDocEl=imgEl;
+  $('img-preview-el').src=currentSrc||'';
+  $('i-title').textContent=tr('img_title');
+  $('img-choose-btn').textContent=tr('choose_img');
+  $('img-cancel-btn').textContent=tr('cancel');
+  show($('img-modal'));
+}
+
+$('img-cancel-btn').addEventListener('click',()=>hide($('img-modal')));
+$('img-modal').addEventListener('click',e=>{if(e.target===$('img-modal'))hide($('img-modal'));});
+$('img-choose-btn').addEventListener('click',()=>$('img-file-input').click());
+
+function compressImage(dataUrl,maxPx,quality,cb){
+  const img=new Image();
+  img.onload=()=>{
+    let w=img.width,h=img.height;
+    if(w>maxPx||h>maxPx){const r=Math.min(maxPx/w,maxPx/h);w=Math.round(w*r);h=Math.round(h*r);}
+    const cv=document.createElement('canvas');cv.width=w;cv.height=h;
+    cv.getContext('2d').drawImage(img,0,0,w,h);
+    cb(cv.toDataURL('image/jpeg',quality));
+  };
+  img.src=dataUrl;
+}
+$('img-file-input').addEventListener('change',e=>{
+  const f=e.target.files[0];if(!f)return;
+  // Reject oversized uploads — large images can crash mobile browser tabs
+  // during readAsDataURL and bloat the saved PPTX/DOCX.
+  if(f.size > 10 * 1024 * 1024){
+    e.target.value='';
+    showErr(L==='ru'?'Изображение слишком большое (макс 10 МБ)':L==='en'?'Image too large (max 10 MB)':'Rasm juda katta (maks 10 MB)');
+    setTimeout(()=>hide($('error-screen')),2500);
+    return;
+  }
+  const rd=new FileReader();
+  rd.onerror=()=>{
+    e.target.value='';
+    showErr(L==='ru'?'Не удалось прочитать файл':L==='en'?'Could not read file':"Faylni o'qib bo'lmadi");
+    setTimeout(()=>hide($('error-screen')),2500);
+  };
+  rd.onload=ev=>{
+    compressImage(ev.target.result,1200,0.82,src=>{
+      if(_imgMode==='docx'){
+        dImgChg[_imgDocIdx]=src;
+        if(_imgDocEl){
+          _imgDocEl.src=src;
+          _imgDocEl.classList.add('edited');
+        }
+        hide($('img-modal'));
+        refreshBadge();
+      } else {
+        ensureVChg(_imgDispIdx);
+        if(!vChg[_imgDispIdx][_imgShapeKey]) vChg[_imgDispIdx][_imgShapeKey]={};
+        vChg[_imgDispIdx][_imgShapeKey].type='image';
+        vChg[_imgDispIdx][_imgShapeKey].src=src;
+        hide($('img-modal'));
+        renderSlide(_imgDispIdx);
+        updateThumb(_imgDispIdx);
+        refreshBadge();
+      }
+    });
+  };
+  rd.readAsDataURL(f);
+  e.target.value='';
+});
+
+/* ── DOCX inline editing helpers ─────────── */
+function _placeCaretEnd(el){
+  try{
+    const r=document.createRange();r.selectNodeContents(el);r.collapse(false);
+    const s=window.getSelection();s.removeAllRanges();s.addRange(r);
+  }catch(_){}
+}
+
+function _scrollIntoViewMobile(el){
+  // Telegram WebApp on iOS/Android: keyboard pops up — scroll the focused element
+  // above the keyboard so the user can see what they're typing.
+  setTimeout(()=>{
+    try{
+      el.scrollIntoView({block:'center',behavior:'smooth'});
+    }catch(_){
+      try{ el.scrollIntoView(); }catch(__){}
+    }
+  }, 200);
+}
+
+function _attachParaEdit(d, p){
+  // Inline contenteditable paragraph editing.
+  d.addEventListener('click', ()=>{
+    if(d.getAttribute('contenteditable')==='true') return;
+    d.setAttribute('contenteditable','true');
+    d.classList.add('editing');
+    d.focus();
+    _placeCaretEnd(d);
+    _scrollIntoViewMobile(d);
+  });
+  d.addEventListener('blur', ()=>{
+    if(d.getAttribute('contenteditable')!=='true') return;
+    d.removeAttribute('contenteditable');
+    d.classList.remove('editing');
+    // Normalize NBSP → space; if user only typed whitespace where original was empty,
+    // treat as unchanged.
+    const newText = d.innerText.replace(/\u00a0/g,' ');
+    const orig = dpOrig[p.idx] ?? (p.text||'');
+    const sameWhenEmpty = !newText.trim() && !orig.trim();
+    if(newText !== orig && !sameWhenEmpty){
+      pChg[p.idx] = newText;
+      d.classList.add('edited');
+    } else {
+      delete pChg[p.idx];
+      d.classList.remove('edited');
+    }
+    if(!d.innerText.trim()) d.textContent='\u00a0';
+    refreshBadge();
+  });
+  d.addEventListener('keydown', e=>{
+    if(e.key==='Escape'){
+      e.preventDefault();
+      // Restore original / pChg snapshot then blur without saving the in-flight edit.
+      const saved = pChg[p.idx];
+      const restoreText = saved!==undefined ? saved : (dpOrig[p.idx] ?? (p.text||''));
+      d.textContent = restoreText || '\u00a0';
+      d.removeAttribute('contenteditable');
+      d.classList.remove('editing');
+    }
+  });
+}
+
+function _attachCellEdit(td, t_idx, ri, ci){
+  const key = `${t_idx}_${ri}_${ci}`;
+  td.addEventListener('click', ()=>{
+    if(td.getAttribute('contenteditable')==='true') return;
+    td.setAttribute('contenteditable','true');
+    td.classList.add('editing');
+    td.focus();
+    _placeCaretEnd(td);
+    _scrollIntoViewMobile(td);
+  });
+  td.addEventListener('blur', ()=>{
+    if(td.getAttribute('contenteditable')!=='true') return;
+    td.removeAttribute('contenteditable');
+    td.classList.remove('editing');
+    // Preserve leading/trailing spaces; only collapse a fully blank cell.
+    const newText = td.innerText.replace(/\u00a0/g,' ');
+    const orig = dtOrig[key] ?? '';
+    const sameWhenEmpty = !newText.trim() && !orig.trim();
+    if(newText !== orig && !sameWhenEmpty){
+      dtChg[key] = newText;
+      td.classList.add('edited');
+    } else {
+      delete dtChg[key];
+      td.classList.remove('edited');
+    }
+    if(!td.innerText.trim()) td.innerHTML='&nbsp;';
+    refreshBadge();
+  });
+  td.addEventListener('keydown', e=>{
+    if(e.key==='Escape'){
+      e.preventDefault();
+      const saved = dtChg[key];
+      const restore = saved!==undefined ? saved : (dtOrig[key] ?? '');
+      td.textContent = restore || '\u00a0';
+      td.removeAttribute('contenteditable');
+      td.classList.remove('editing');
+    }
+  });
+}
+
+/* ── DOCX render ─────────────────────────── */
+function renderDocx(data){
+  const el=$('docx-editor');el.innerHTML='';
+  // Reset per-doc state so a second load in the same session doesn't carry over
+  // stale originals or pending changes from a prior document.
+  for(const k in pChg) delete pChg[k];
+  for(const k in dtChg) delete dtChg[k];
+  for(const k in dImgChg) delete dImgChg[k];
+  for(const k in dpOrig) delete dpOrig[k];
+  for(const k in dtOrig) delete dtOrig[k];
+
+  // Backward compat: server may send {items: [...]} or legacy {paras: [...]}
+  let items = data.items;
+  if(!items || !items.length){
+    items = (data.paras||[]).map(p=>({type:'para',...p}));
+  }
+  // Snapshot originals so blur-diff is stable.
+  items.forEach(it=>{
+    if(it.type==='para') dpOrig[it.idx]=it.text||'';
+    if(it.type==='table'){
+      it.rows.forEach((row,ri)=>row.forEach((cell,ci)=>{
+        const k=`${it.t_idx}_${ri}_${ci}`;
+        dtOrig[k]=cell.text||'';
+      }));
+    }
+  });
+
+  const PAGE=30;
+  const pages=Math.max(1,Math.ceil(items.length/PAGE));
+  for(let pi=0;pi<pages;pi++){
+    const pg=document.createElement('div');pg.className='doc-page';
+    items.slice(pi*PAGE,(pi+1)*PAGE).forEach(it=>{
+      if(it.type==='para'){
+        const d=document.createElement('div');d.className='doc-para';
+        if(pChg[it.idx]!==undefined) d.classList.add('edited');
+        d.style.cssText=`font-size:${it.size}px;font-weight:${it.bold?'bold':'normal'};color:${it.color};text-align:${it.align}`;
+        const txt = pChg[it.idx]!==undefined ? pChg[it.idx] : (it.text||'');
+        d.textContent = txt || '\u00a0';
+        _attachParaEdit(d, it);
+        pg.appendChild(d);
+
+      } else if(it.type==='table'){
+        const wrap=document.createElement('div');wrap.className='doc-table-wrap';
+        const tbl=document.createElement('table');tbl.className='doc-table';
+        (it.rows||[]).forEach((row,ri)=>{
+          const tr_el=document.createElement('tr');
+          row.forEach((cell,ci)=>{
+            const td=document.createElement('td');
+            const key=`${it.t_idx}_${ri}_${ci}`;
+            const txt = dtChg[key]!==undefined ? dtChg[key] : (cell.text||'');
+            td.textContent = txt || '\u00a0';
+            if(cell.bold) td.style.fontWeight='700';
+            if(cell.color && cell.color!=='#111111') td.style.color=cell.color;
+            if(dtChg[key]!==undefined) td.classList.add('edited');
+            _attachCellEdit(td, it.t_idx, ri, ci);
+            tr_el.appendChild(td);
+          });
+          tbl.appendChild(tr_el);
+        });
+        wrap.appendChild(tbl);
+        pg.appendChild(wrap);
+
+      } else if(it.type==='image'){
+        const wrap=document.createElement('div');wrap.className='doc-img-wrap';
+        const im=document.createElement('img');im.className='doc-img';
+        const imgIdx = (typeof it.img_idx === 'number') ? it.img_idx : -1;
+        im.src = (imgIdx>=0 && dImgChg[imgIdx]) ? dImgChg[imgIdx] : (it.src||'');
+        im.alt='';
+        if(imgIdx>=0 && dImgChg[imgIdx]) im.classList.add('edited');
+        if(imgIdx>=0){
+          im.addEventListener('click', ()=>{
+            openDocImgModal(imgIdx, im.src, im);
+          });
+          const pill=document.createElement('div');pill.className='doc-img-pill';
+          pill.textContent=tr('img_pill');
+          wrap.appendChild(pill);
+        }
+        wrap.appendChild(im);
+        pg.appendChild(wrap);
+      }
+    });
+    const pn=document.createElement('div');pn.className='page-num';pn.textContent=`${pi+1}`;
+    pg.appendChild(pn);
+    el.appendChild(pg);
+  }
+}
+
+/* ── Load ────────────────────────────────── */
+async function loadDoc(){
+  $('load-text').textContent=tr('loading');
+  if(!TOKEN){showErr(tr('err_exp'));return;}
+  try{
+    const res=await fetch(`/api/slides/${TOKEN}`,{headers:_authHeaders()});
+    if(!res.ok){showErr(tr('err_exp'));return;}
+    let data;
+    try{ data=await res.json(); }
+    catch(e){ showErr(tr('err_exp')); return; }
+    if(!data||data.error){showErr(tr('err_exp'));return;}
+    $('topic-title').textContent=data.topic||'';
+    fileType=data.file_type||'pptx';
+    hide($('loading'));
+    show($('header'));
+    show($('footer'));
+    saveBtn.textContent=tr('save');
+    if(fileType==='pptx'){
+      slideData=data;
+      displaySlides=data.slides.map((_,i)=>({type:'orig',idx:i}));
+      buildThumbs();
+      $('btn-templates').textContent=tr('tpl_btn');
+      show($('pptx-editor'));
+      show($('action-bar'));
+      requestAnimationFrame(()=>{setVPH();renderSlide(0);});
+    } else {
+      docData=data;
+      show($('docx-editor'));
+      requestAnimationFrame(()=>renderDocx(data));
+    }
+  }catch(e){ showErr(tr('err_exp')); }
+}
+
+/* ── Save ────────────────────────────────── */
+saveBtn.addEventListener('click',async()=>{
+  saveBtn.disabled=true;
+  saveBtn.textContent=tr('saving');
+  _saveInProgress = true;
+  // Flush any in-flight inline edit (PPTX or DOCX) so its blur handler commits.
+  if(document.activeElement && (
+      document.activeElement.classList?.contains('s-text-wrap') ||
+      document.activeElement.classList?.contains('doc-para') ||
+      document.activeElement.classList?.contains('editing')
+  )){
+    try{ document.activeElement.blur(); }catch(_){}
+  }
+  const body={file_type:fileType};
+  if(fileType==='pptx'){
+    const vc={};
+    for(const di in vChg){
+      const entry=displaySlides[parseInt(di)];
+      if(!entry||entry.type!=='orig')continue;
+      const ok=String(entry.idx);
+      if(!vc[ok])vc[ok]={};
+      Object.assign(vc[ok],vChg[di]);
+    }
+    body.visual_changes=vc;
+    body.new_shapes={};
+    body.slide_order=displaySlides;
+    if(Object.keys(bgChg).length){
+      const bc={};
+      for(const k in bgChg){ bc[String(k)]=bgChg[k]; }
+      body.bg_changes=bc;
+    }
+  } else {
+    body.visual_changes={};
+    body.para_changes=pChg;
+    body.table_changes=dtChg;
+    body.image_changes=dImgChg;
+  }
+  try{
+    const res=await fetch(`/api/save/${TOKEN}`,{
+      method:'POST',
+      headers:Object.assign({'Content-Type':'application/json'}, _authHeaders()),
+      body:JSON.stringify(body),
+    });
+    const d=await res.json();
+    if(d.ok){
+      $('s-title').textContent=tr('success_title');
+      $('s-sub').textContent=tr('success_sub');
+      show($('success-screen'));
+      setTimeout(()=>{if(tg)tg.close();},2200);
+    } else throw new Error(d.error||'err');
+  }catch(e){
+    _saveInProgress = false;
+    saveBtn.disabled=false;
+    saveBtn.textContent=tr('save');
+    showErr(tr('err_save'));
+    setTimeout(()=>hide($('error-screen')),3000);
+  }
+});
+
+/* ── Error ───────────────────────────────── */
+function showErr(msg){hide($('loading'));$('e-sub').textContent=msg;show($('error-screen'));}
+$('retry-btn').addEventListener('click',()=>hide($('error-screen')));
+
+loadDoc();
+</script>
+</body>
+</html>
